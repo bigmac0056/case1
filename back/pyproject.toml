@@ -1,0 +1,30 @@
+[project]
+name = "back"
+version = "0.1.0"
+description = "Backend for DAMUMED Chrome Extension"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "pydantic>=2.10.0",
+    "psycopg2-binary>=2.9.10",
+    "httpx>=0.28.0",
+    "python-dotenv>=1.0.1",
+    "pydantic-settings>=2.7.0",
+    "faster-whisper>=1.0.0",
+    "python-multipart>=0.0.20",
+]
+
+[tool.hatch.build]
+include = [
+    "main.py",
+    "src/**/*.py",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

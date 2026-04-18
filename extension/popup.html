@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Damumed Agent</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="head">
+        <div class="head-title">Damumed RPA Agent</div>
+        <div class="head-status">
+          <span id="backendDot" class="dot dot-off" title="Backend"></span>
+          <span id="backendLabel" class="status-label">backend...</span>
+          <span id="voiceDot" class="dot dot-off" title="Voice"></span>
+          <span id="voiceLabel" class="status-label">микрофон выкл</span>
+        </div>
+      </header>
+
+      <div id="damumedWarning" class="warning hidden">
+        Откройте вкладку Damumed или sandbox, затем нажмите "Говорить"
+      </div>
+
+      <div id="statusBar" class="status-bar hidden">
+        <span id="statusText">Готово</span>
+      </div>
+
+      <section class="card">
+        <div class="section-label">Голосовой ввод</div>
+        <button id="btnTalk" class="btn-primary btn-huge">🎙️ Говорить</button>
+
+        <div id="stageBar" class="stage-bar">
+          <span id="stageLabel">Ожидание</span>
+          <span id="visitLinesCount" class="visit-lines-count hidden"></span>
+        </div>
+        <div id="lastTranscript" class="last-transcript hidden"></div>
+
+        <div class="action-grid">
+          <button id="btnStartRecording" class="btn-action">▶ Начать прием</button>
+          <button id="btnFinishRecording" class="btn-action">⏹ Завершить прием</button>
+        </div>
+        <button id="btnForceConfirm" class="btn-confirm hidden">✅ Подтвердить (пропустить проверку)</button>
+      </section>
+
+      <section class="card">
+        <div class="section-label">Ручная проверка перед подтверждением</div>
+        <div class="field-row">
+          <label class="field-label">Жалобы</label>
+          <textarea id="fieldComplaints" rows="2" placeholder="Введите или проверьте жалобы"></textarea>
+        </div>
+        <div class="field-row">
+          <label class="field-label">Анамнез</label>
+          <textarea id="fieldAnamnesis" rows="2" placeholder="Введите или проверьте анамнез"></textarea>
+        </div>
+        <div class="field-row">
+          <label class="field-label">Объективно</label>
+          <textarea id="fieldObjective" rows="2" placeholder="Введите или проверьте объективный статус"></textarea>
+        </div>
+        <div class="field-row">
+          <label class="field-label">Диагноз</label>
+          <textarea id="fieldDiagnosis" rows="2" placeholder="Введите или проверьте диагноз"></textarea>
+        </div>
+        <div class="field-row">
+          <label class="field-label">Назначения</label>
+          <textarea id="fieldTreatment" rows="2" placeholder="Введите или проверьте назначения"></textarea>
+        </div>
+        <div class="field-row">
+          <label class="field-label">Дневник</label>
+          <textarea id="fieldDiary" rows="2" placeholder="Введите или проверьте дневник"></textarea>
+        </div>
+        <button id="btnApplyManual" class="btn-primary" style="width: 100%">Внести в форму вручную</button>
+        <div id="manualStatus" class="fill-status"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-label">Настройки URL</div>
+        <div class="field-row">
+          <label class="field-label">Damumed URL</label>
+          <input id="damumed-url" type="url" placeholder="https://damumed.kz" />
+        </div>
+        <div class="field-row">
+          <label class="field-label">Песочница URL</label>
+          <input id="sandbox-url" type="url" placeholder="http://localhost:4173" />
+        </div>
+        <div class="action-grid" style="margin-top: 4px">
+          <button id="open-damumed" class="btn-action">Damumed</button>
+          <button id="open-sandbox" class="btn-action">Песочница</button>
+        </div>
+        <button id="save-urls" class="btn-primary" style="width: 100%; margin-top: 4px">Сохранить URL</button>
+        <p id="popup-status" class="fill-status" aria-live="polite"></p>
+      </section>
+
+      <section class="card">
+        <div class="section-label">Лог активности</div>
+        <div id="activityLog" class="activity-log"></div>
+      </section>
+
+      <section class="card tips">
+        <div class="tip">Backend health: http://127.0.0.1:8000/health</div>
+        <div class="tip">После обновления: Reload extension + Cmd+Shift+R</div>
+      </section>
+    </main>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

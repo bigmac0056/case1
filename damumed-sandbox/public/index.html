@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dmed Sandbox - Прием и назначения</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-logo">D</div>
+        <div>
+          <div class="brand-name">Dmed.Стационар</div>
+          <div class="brand-version">Sandbox 1.0</div>
+        </div>
+      </div>
+      <div class="user-info">
+        <div class="user-name">САРЕНОВА БОТАКОЗ МАКСАТОВНА</div>
+        <div class="user-role">Невропатолог детский</div>
+      </div>
+    </header>
+
+    <section class="profile-bar">
+      <div class="profile-bar-left">
+        <strong>Профиль интерфейса:</strong>
+        <select id="profileSelect"></select>
+        <button id="applyProfileBtn" class="secondary">Применить профиль</button>
+      </div>
+      <div id="profileBadge" class="profile-badge"></div>
+    </section>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <h2 class="panel-title">Навигация</h2>
+        <button class="nav-btn active" data-screen="reception">Приемный покой</button>
+        <button class="nav-btn" data-screen="record">Медицинская запись</button>
+        <button class="nav-btn" data-screen="schedule">Назначения</button>
+        <button class="nav-btn" data-screen="diary">Дневник процедур</button>
+        <button class="nav-btn" data-screen="audit">Журнал действий</button>
+      </aside>
+
+      <section class="content">
+        <div id="toast" class="toast" aria-live="polite"></div>
+
+        <section class="screen active" id="screen-reception">
+          <div class="card">
+            <h2>Открыть первичный прием</h2>
+            <p class="hint">Выберите пациента из списка или введите ФИО / ID и нажмите «Открыть»</p>
+            <div id="patientList" class="patient-list"></div>
+            <div class="row" style="margin-top:12px;">
+              <input id="patientQuery" type="text" placeholder="ФИО или ID пациента" />
+              <button id="openReceptionBtn">Открыть</button>
+            </div>
+            <div id="currentPatient" class="result"></div>
+          </div>
+        </section>
+
+        <section class="screen" id="screen-record">
+          <div class="card">
+            <h2>Гранулярное заполнение</h2>
+            <p class="hint">Поля отдельно: Жалобы, Анамнез, Объективные данные, Назначения</p>
+
+            <div class="record-layout">
+              <nav id="fieldTabs" class="field-tabs">
+                <button class="field-tab active" data-field="complaints" data-testid="complaints-tab">Жалобы при поступлении</button>
+                <button class="field-tab" data-field="anamnesis" data-testid="anamnesis-tab">Анамнез заболевания</button>
+                <button class="field-tab" data-field="objectiveStatus" data-testid="objective-tab">Объективные данные</button>
+                <button class="field-tab" data-field="diagnosis" data-testid="diagnosis-tab">Диагноз</button>
+                <button class="field-tab" data-field="recommendations" data-testid="treatment-tab">Назначения</button>
+                <button class="field-tab" data-field="diary" data-testid="diary-tab">Дневник</button>
+              </nav>
+
+              <div class="field-editor">
+                <label id="fieldLabel" for="fieldInput">Жалобы при поступлении</label>
+                <textarea id="fieldInput" data-testid="record-field-input" rows="14"></textarea>
+              </div>
+            </div>
+
+            <div class="row right">
+              <button id="saveRecordBtn">Сохранить осмотр</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" id="screen-schedule">
+          <div class="card">
+            <h2 id="scheduleTitle">Расписание</h2>
+            <p class="hint">Greedy earliest-fit + учет доступных слотов специалистов</p>
+
+            <div class="schedule-controls">
+              <div class="control-group">
+                <label for="lfkCount">ЛФК (сеансов)</label>
+                <input id="lfkCount" type="number" min="1" max="18" value="9" />
+              </div>
+              <div class="control-group">
+                <label for="massageCount">Массаж (сеансов)</label>
+                <input id="massageCount" type="number" min="1" max="18" value="5" />
+              </div>
+              <div class="control-group">
+                <label for="psyCount">Психолог (сеансов)</label>
+                <input id="psyCount" type="number" min="1" max="18" value="3" />
+              </div>
+              <div class="control-group">
+                <label for="startDate">Старт даты</label>
+                <input id="startDate" type="date" />
+              </div>
+              <div class="control-group">
+                <label for="workingDaysTarget">Рабочие дни</label>
+                <input id="workingDaysTarget" type="number" min="1" max="20" value="9" />
+              </div>
+              <div class="control-group">
+                <label for="childStatus">Статус ребенка</label>
+                <select id="childStatus">
+                  <option value="deviations">Отклонения</option>
+                  <option value="norm">Норма</option>
+                </select>
+              </div>
+              <div class="control-group">
+                <label for="consultationTime">Время консультации</label>
+                <input id="consultationTime" type="time" />
+              </div>
+              <div class="control-group">
+                <label for="consultationEndTime">Окончание консультации</label>
+                <input id="consultationEndTime" type="time" />
+              </div>
+              <div class="control-group">
+                <label for="hospitalizationTime">Время госпитализации</label>
+                <input id="hospitalizationTime" type="time" />
+              </div>
+              <button id="generateScheduleBtn">Сформировать</button>
+            </div>
+
+            <div id="scheduleSummary" class="result"></div>
+            <div id="scheduleTableWrap"></div>
+          </div>
+        </section>
+
+        <section class="screen" id="screen-diary">
+          <div class="card">
+            <h2>Назначения и статус "Выполнено"</h2>
+            <p class="hint">Отметка статуса с реальным timestamp + короткая дневниковая запись</p>
+            <div id="assignmentsWrap"></div>
+          </div>
+        </section>
+
+        <section class="screen" id="screen-audit">
+          <div class="card">
+            <h2>Audit Trail</h2>
+            <p class="hint">Лог действий агента: клики, сохранения, статусы</p>
+            <div class="row right">
+              <button id="refreshAuditBtn">Обновить лог</button>
+            </div>
+            <div id="auditWrap"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

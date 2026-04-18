@@ -1,0 +1,4289 @@
+(function () {
+  const PAGE_TOAST_ID = "aqbobek-page-toast";
+
+  function pageToast(message) {
+    const existing = document.getElementById(PAGE_TOAST_ID);
+    if (existing) {
+      existing.remove();
+    }
+
+    const host = document.body || document.documentElement;
+    if (!host) {
+      return;
+    }
+
+    const toast = document.createElement("div");
+    toast.id = PAGE_TOAST_ID;
+    toast.style.all = "initial";
+    toast.style.position = "fixed";
+    toast.style.right = "16px";
+    toast.style.bottom = "16px";
+    toast.style.zIndex = "2147483647";
+    toast.style.background = "rgba(18,25,41,0.95)";
+    toast.style.color = "#fff";
+    toast.style.padding = "10px 12px";
+    toast.style.borderRadius = "12px";
+    toast.style.fontFamily = "Nunito Sans, sans-serif";
+    toast.style.fontSize = "12px";
+    toast.style.fontWeight = "700";
+    toast.style.boxShadow = "0 18px 28px rgba(22,28,32,0.2)";
+    toast.textContent = message;
+
+    host.appendChild(toast);
+
+    window.setTimeout(() => {
+      toast.remove();
+    }, 1800);
+  }
+
+  const ASSISTANT_ROOT_ID = "aqb-jarvis-root";
+  const ENABLE_IN_PAGE_ASSISTANT_UI = false;
+  const STORAGE_KEYS = {
+    damumedUrl: "jarvis_damumed_url",
+    sandboxUrl: "jarvis_sandbox_url",
+    localAiUrl: "jarvis_local_ai_url",
+    session: "jarvis_assistant_session",
+  };
+
+  const DEFAULTS = {
+    damumedUrl: "https://damumed.kz",
+    sandboxUrl: "http://localhost:4173",
+    localAiUrl: "http://127.0.0.1:8000/api/jarvis/process-visit",
+  };
+
+  const STAGE = {
+    IDLE: "idle",
+    COMMAND: "command",
+    AWAITING_LOGIN: "awaiting_login",
+    RECORDING_VISIT: "recording_visit",
+    PROCESSING_VISIT: "processing_visit",
+    AWAITING_VISIT_CONFIRMATION: "awaiting_visit_confirmation",
+    AWAITING_SCHEDULE_CONFIRMATION: "awaiting_schedule_confirmation",
+    AWAITING_SLOT_SELECTION: "awaiting_slot_selection",
+  };
+
+  const STAGE_TITLES = {
+    [STAGE.IDLE]: "Ожидание",
+    [STAGE.COMMAND]: "Командный режим",
+    [STAGE.AWAITING_LOGIN]: "Ожидаем вход врача",
+    [STAGE.RECORDING_VISIT]: "Идет запись приема",
+    [STAGE.PROCESSING_VISIT]: "Локальная обработка записи",
+    [STAGE.AWAITING_VISIT_CONFIRMATION]: "Подтверждение документа",
+    [STAGE.AWAITING_SCHEDULE_CONFIRMATION]: "Подтверждение расписания",
+    [STAGE.AWAITING_SLOT_SELECTION]: "Выбор слота по голосу",
+  };
+
+  const MAX_TRANSCRIPT_ITEMS = 80;
+  const VOICE_AUTHOR = "voice";
+  const JARVIS_AUTHOR = "jarvis";
+  const PREFER_BACKEND_STT = true;
+  const BACKEND_STT_CHUNK_MS = 3200;
+  const BACKEND_STT_MIN_TEXT_CHARS = 2;
+  const SLOT_REQUEST_TTL_MS = 15000;
+  const VISIT_FIELD_TITLES = {
+    complaints: "жалобы",
+    anamnesis: "анамнез",
+    objective: "объективно",
+    diagnosis: "диагноз",
+    treatment: "назначения",
+    diary: "дневник",
+  };
+
+  const state = {
+    stage: STAGE.IDLE,
+    listening: false,
+    recognitionRunning: false,
+    narratorSpeaking: false,
+    recognitionError: "",
+    recognition: null,
+    backendStream: null,
+    backendRecorder: null,
+    backendLoopActive: false,
+    backendStopRequested: false,
+    transcript: [],
+    visitLines: [],
+    visitDraft: null,
+    scheduleGrid: [],
+    runtimeSlots: [],
+    pendingSuggestedSlot: null,
+    pendingSlotRequest: null,
+    awaitingVoiceConfirm: null,
+    strictVisitPending: false,
+    patientHint: "",
+    pendingSiteCheck: null,
+    sttBusy: false,
+    lastHeardText: "",
+    lastHeardAt: 0,
+    panelCollapsed: false,
+    config: {
+      damumedUrl: DEFAULTS.damumedUrl,
+      sandboxUrl: DEFAULTS.sandboxUrl,
+      localAiUrl: DEFAULTS.localAiUrl,
+    },
+    lastResponse: {
+      action: "none",
+      speech: "",
+      status: "IDLE",
+      data: {},
+    },
+  };
+
+  const RESPONSE_STATUS_MAP = {
+    [STAGE.IDLE]: "IDLE",
+    [STAGE.AWAITING_LOGIN]: "IDLE",
+    [STAGE.COMMAND]: "READY",
+    [STAGE.RECORDING_VISIT]: "RECORDING",
+    [STAGE.PROCESSING_VISIT]: "PROCESSING",
+    [STAGE.AWAITING_VISIT_CONFIRMATION]: "CONFIRMATION",
+    [STAGE.AWAITING_SCHEDULE_CONFIRMATION]: "SCHEDULING",
+    [STAGE.AWAITING_SLOT_SELECTION]: "SCHEDULING",
+  };
+
+  const refs = {
+    root: null,
+    panel: null,
+    fab: null,
+    status: null,
+    talkButton: null,
+    resetButton: null,
+    saveConfigButton: null,
+    damumedInput: null,
+    sandboxInput: null,
+    localAiInput: null,
+    transcript: null,
+    draft: null,
+    schedule: null,
+    minimize: null,
+  };
+
+  let persistTimer = null;
+  let loginWatchTimer = null;
+  const voiceQueue = [];
+  let voiceQueueBusy = false;
+  const domSlotElements = new Map();
+
+  const WEEKDAY_WORDS = [
+    "понедел",
+    "вторн",
+    "сред",        // среда, среду, среды, средой
+    "четвер",
+    "пятниц",      // пятница, пятницу, пятницей
+    "суббот",      // суббота, субботу
+    "воскрес",     // воскресенье, воскресенья
+  ];
+
+  const MONTH_WORDS = [
+    "январ",
+    "феврал",
+    "март",
+    "апрел",
+    "ма",
+    "июн",
+    "июл",
+    "август",
+    "сентябр",
+    "октябр",
+    "ноябр",
+    "декабр",
+  ];
+
+  const DOCTOR_DICTIONARY = [
+    { name: "Инструктор ЛФК", keywords: ["лфк", "инструктор лфк", "реабилитолог"] },
+    { name: "Массажист", keywords: ["массаж", "массажист"] },
+    { name: "Клинический психолог", keywords: ["психолог", "клинический психолог"] },
+    { name: "Невролог", keywords: ["невролог"] },
+    { name: "Кардиолог", keywords: ["кардиолог"] },
+    { name: "Терапевт", keywords: ["терапевт"] },
+    { name: "Ортопед", keywords: ["ортопед"] },
+  ];
+
+  const BUSY_WORDS = [
+    "занят",
+    "занято",
+    "busy",
+    "booked",
+    "reserved",
+    "недоступ",
+    "забронир",
+    "бронь",
+    "записан",
+    "блок",
+  ];
+
+  const FREE_WORDS = [
+    "свобод",
+    "free",
+    "доступ",
+    "окно",
+    "available",
+  ];
+
+  const DOM_CONFIG_DEFAULTS = {
+    interactiveSelectors: [
+      "button",
+      "a",
+      "[role='button']",
+      "[onclick]",
+      ".btn",
+      ".button",
+      "[data-testid*='button']",
+      "[data-testid*='action']",
+    ],
+    patient: {
+      searchSelectors: [
+        "input[placeholder*='Пациент']",
+        "input[placeholder*='ФИО']",
+        "input[placeholder*='поиск']",
+        "input[placeholder*='пациент']",
+        "input[placeholder*='ИИН']",
+        "input[placeholder*='Фамилия']",
+        "input[placeholder*='Search']",
+        "input[name*='patient']",
+        "input[name*='search']",
+        "input[id*='patient']",
+        "input[id*='search']",
+        "input[data-testid*='patient-search']",
+      ],
+      cardSelectors: [
+        "tr[data-patient-id]",
+        "[data-patient-id]",
+        "[data-testid*='patient-row']",
+        "[data-testid*='patient-card']",
+        ".patient-row",
+        ".patient-card",
+        ".patient-list-item",
+        "tr",
+      ],
+      cardTextHints: ["паци", "patient", "фио", "дата рождения", "карточка", "прием"],
+      openButtonsSelectors: ["button", "a", "[role='button']", ".btn", ".button"],
+      openButtonsKeywords: ["прием", "осмотр", "карточка", "открыть", "перейти", "open"],
+    },
+    visit: {
+      startButtonSelectors: [
+        "button",
+        "a",
+        "[role='button']",
+        "[type='button']",
+        ".btn",
+        ".button",
+        "[data-testid*='visit']",
+        "[data-testid*='appointment']",
+      ],
+      startButtonKeywords: [
+        "прием",
+        "начать прием",
+        "открыть прием",
+        "начать осмотр",
+        "осмотр",
+        "войти в прием",
+        "консультация",
+        "appointment",
+        "consultation",
+      ],
+      fieldSelectors: {
+        complaints: [
+          "[data-testid='complaints-field']",
+          "textarea[name*='complaint']",
+          "textarea[id*='complaint']",
+          "textarea[placeholder*='Жалоб']",
+        ],
+        anamnesis: [
+          "[data-testid='anamnesis-field']",
+          "textarea[name*='anamnes']",
+          "textarea[id*='anamnes']",
+          "textarea[placeholder*='Анамнез']",
+        ],
+        objective: [
+          "[data-testid='objective-field']",
+          "textarea[name*='objective']",
+          "textarea[id*='objective']",
+          "textarea[placeholder*='Объектив']",
+        ],
+        diagnosis: [
+          "[data-testid='diagnosis-field']",
+          "textarea[name*='diagnosis']",
+          "textarea[id*='diagnosis']",
+          "textarea[placeholder*='Диагноз']",
+        ],
+        treatment: [
+          "[data-testid='treatment-field']",
+          "textarea[name*='treatment']",
+          "textarea[id*='treatment']",
+          "textarea[placeholder*='Назнач']",
+        ],
+        diary: [
+          "textarea[name*='diary']",
+          "textarea[id*='diary']",
+          "textarea[placeholder*='Дневник']",
+        ],
+      },
+      saveSelectors: [
+        "button",
+        "a",
+        "[role='button']",
+        ".btn",
+        ".button",
+        "[data-testid*='save']",
+        "[data-testid*='confirm']",
+      ],
+      saveKeywords: ["сохран", "подтверд", "примен", "save", "confirm"],
+    },
+    schedule: {
+      slotSelectors: [
+        "[data-slot]",
+        "[data-time]",
+        "[data-specialist]",
+        "[data-testid*='slot']",
+        "[data-testid*='calendar-item']",
+        ".slot",
+        ".schedule-slot",
+        ".slot-row",
+        ".slot-item",
+        ".calendar-slot",
+        ".fc-timegrid-slot",
+        "tr",
+        "li",
+        "button",
+      ],
+      doctorSelectors: [
+        "[data-doctor]",
+        "[data-specialist]",
+        "[data-testid*='doctor']",
+        ".doctor",
+        ".specialist",
+        ".resource-name",
+      ],
+      confirmSelectors: [
+        "button",
+        "a",
+        "[role='button']",
+        ".btn",
+        ".button",
+        "[data-testid*='confirm']",
+        "[data-testid*='save']",
+      ],
+      confirmKeywords: ["подтверд", "сохран", "запис", "создать", "примен", "ok", "confirm", "create"],
+      busyWords: BUSY_WORDS,
+      freeWords: FREE_WORDS,
+      busyClassHints: [
+        "busy",
+        "booked",
+        "reserved",
+        "disabled",
+        "occupied",
+        "unavailable",
+        "blocked",
+      ],
+      freeClassHints: ["free", "available", "open", "enabled"],
+    },
+  };
+
+  function asArray(value, fallback) {
+    if (!Array.isArray(value) || value.length === 0) {
+      return fallback;
+    }
+    return value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
+  }
+
+  function getDomConfig() {
+    const external = window.JarvisDomConfig;
+    if (!external || typeof external !== "object") {
+      return DOM_CONFIG_DEFAULTS;
+    }
+
+    return {
+      interactiveSelectors: asArray(
+        external.interactiveSelectors,
+        DOM_CONFIG_DEFAULTS.interactiveSelectors
+      ),
+      patient: {
+        searchSelectors: asArray(
+          external.patient && external.patient.searchSelectors,
+          DOM_CONFIG_DEFAULTS.patient.searchSelectors
+        ),
+        cardSelectors: asArray(
+          external.patient && external.patient.cardSelectors,
+          DOM_CONFIG_DEFAULTS.patient.cardSelectors
+        ),
+        cardTextHints: asArray(
+          external.patient && external.patient.cardTextHints,
+          DOM_CONFIG_DEFAULTS.patient.cardTextHints
+        ).map((item) => normalizeText(item)),
+        openButtonsSelectors: asArray(
+          external.patient && external.patient.openButtonsSelectors,
+          DOM_CONFIG_DEFAULTS.patient.openButtonsSelectors
+        ),
+        openButtonsKeywords: asArray(
+          external.patient && external.patient.openButtonsKeywords,
+          DOM_CONFIG_DEFAULTS.patient.openButtonsKeywords
+        ).map((item) => normalizeText(item)),
+      },
+      visit: {
+        startButtonSelectors: asArray(
+          external.visit && external.visit.startButtonSelectors,
+          DOM_CONFIG_DEFAULTS.visit.startButtonSelectors
+        ),
+        startButtonKeywords: asArray(
+          external.visit && external.visit.startButtonKeywords,
+          DOM_CONFIG_DEFAULTS.visit.startButtonKeywords
+        ).map((item) => normalizeText(item)),
+        fieldSelectors: {
+          complaints: asArray(
+            external.visit && external.visit.fieldSelectors && external.visit.fieldSelectors.complaints,
+            DOM_CONFIG_DEFAULTS.visit.fieldSelectors.complaints
+          ),
+          anamnesis: asArray(
+            external.visit && external.visit.fieldSelectors && external.visit.fieldSelectors.anamnesis,
+            DOM_CONFIG_DEFAULTS.visit.fieldSelectors.anamnesis
+          ),
+          objective: asArray(
+            external.visit && external.visit.fieldSelectors && external.visit.fieldSelectors.objective,
+            DOM_CONFIG_DEFAULTS.visit.fieldSelectors.objective
+          ),
+          diagnosis: asArray(
+            external.visit && external.visit.fieldSelectors && external.visit.fieldSelectors.diagnosis,
+            DOM_CONFIG_DEFAULTS.visit.fieldSelectors.diagnosis
+          ),
+          treatment: asArray(
+            external.visit && external.visit.fieldSelectors && external.visit.fieldSelectors.treatment,
+            DOM_CONFIG_DEFAULTS.visit.fieldSelectors.treatment
+          ),
+          diary: asArray(
+            external.visit && external.visit.fieldSelectors && external.visit.fieldSelectors.diary,
+            DOM_CONFIG_DEFAULTS.visit.fieldSelectors.diary
+          ),
+        },
+        saveSelectors: asArray(
+          external.visit && external.visit.saveSelectors,
+          DOM_CONFIG_DEFAULTS.visit.saveSelectors
+        ),
+        saveKeywords: asArray(
+          external.visit && external.visit.saveKeywords,
+          DOM_CONFIG_DEFAULTS.visit.saveKeywords
+        ).map((item) => normalizeText(item)),
+      },
+      schedule: {
+        slotSelectors: asArray(
+          external.schedule && external.schedule.slotSelectors,
+          DOM_CONFIG_DEFAULTS.schedule.slotSelectors
+        ),
+        doctorSelectors: asArray(
+          external.schedule && external.schedule.doctorSelectors,
+          DOM_CONFIG_DEFAULTS.schedule.doctorSelectors
+        ),
+        confirmSelectors: asArray(
+          external.schedule && external.schedule.confirmSelectors,
+          DOM_CONFIG_DEFAULTS.schedule.confirmSelectors
+        ),
+        confirmKeywords: asArray(
+          external.schedule && external.schedule.confirmKeywords,
+          DOM_CONFIG_DEFAULTS.schedule.confirmKeywords
+        ).map((item) => normalizeText(item)),
+        busyWords: asArray(
+          external.schedule && external.schedule.busyWords,
+          DOM_CONFIG_DEFAULTS.schedule.busyWords
+        ).map((item) => normalizeText(item)),
+        freeWords: asArray(
+          external.schedule && external.schedule.freeWords,
+          DOM_CONFIG_DEFAULTS.schedule.freeWords
+        ).map((item) => normalizeText(item)),
+        busyClassHints: asArray(
+          external.schedule && external.schedule.busyClassHints,
+          DOM_CONFIG_DEFAULTS.schedule.busyClassHints
+        ).map((item) => normalizeText(item)),
+        freeClassHints: asArray(
+          external.schedule && external.schedule.freeClassHints,
+          DOM_CONFIG_DEFAULTS.schedule.freeClassHints
+        ).map((item) => normalizeText(item)),
+      },
+    };
+  }
+
+  const DOM_CONFIG = getDomConfig();
+
+  function storageGet(keys) {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
+      return Promise.resolve({});
+    }
+
+    return new Promise((resolve) => {
+      chrome.storage.local.get(keys, (result) => {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          resolve({});
+          return;
+        }
+        resolve(result || {});
+      });
+    });
+  }
+
+  function storageSet(values) {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      chrome.storage.local.set(values, () => {
+        resolve();
+      });
+    });
+  }
+
+  function normalizeText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/ё/g, "е")
+      .replace(/[^a-zа-я0-9\s]/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function normalizeWakeVariants(value) {
+    const text = normalizeText(value);
+    if (!text) {
+      return text;
+    }
+
+    const canonicalByAlias = {
+      джарвис: "джарвиз",
+      джарвич: "джарвиз",
+      джарвизз: "джарвиз",
+      джарвисс: "джарвиз",
+      джарвик: "джарвиз",
+      джарвив: "джарвиз",
+      джарви: "джарвиз",
+      джарв: "джарвиз",
+      ярвис: "джарвиз",
+      ярвиз: "джарвиз",
+      jarviss: "jarvis",
+      jarwis: "jarvis",
+      jarwiz: "jarvis",
+      jarv: "jarvis",
+    };
+
+    return text
+      .split(" ")
+      .map((token) => canonicalByAlias[token] || token)
+      .join(" ");
+  }
+
+  function includesAny(source, samples) {
+    return samples.some((sample) => source.includes(sample));
+  }
+
+  function escapeHtml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function trimArray(array, maxLength) {
+    if (array.length <= maxLength) {
+      return array;
+    }
+    return array.slice(array.length - maxLength);
+  }
+
+  const COMMAND_DEFAULTS = {
+    wakeWords: [
+      "джарвиз", "джарвис", "джарвич", "джарви", "джарв", "джарвив", "джарвисс", "джарвизз",
+      "ярвис", "ярвиз",
+      "jarvis", "jarviss", "jarwis", "jarwiz", "jarv",
+    ],
+    openDamumed: [
+      "джарвиз открой дамумед",
+      "джарвиз открой сайт дамумед",
+      "джарвиз дамумед открой",
+      "джарвиз open damumed",
+    ],
+    openSandbox: [
+      "джарвиз открой песочницу",
+      "джарвиз открой сайт песочницы",
+      "джарвиз песочницу открой",
+      "джарвиз open sandbox",
+    ],
+    startVisit: [
+      "джарвиз начни прием", "джарвис начни прием",
+      "джарвиз начинай прием", "джарвис начинай прием",
+      "джарвиз открой прием", "джарвис открой прием",
+      "джарвиз старт прием", "джарвис старт прием",
+      "джарвиз начать прием", "джарвис начать прием",
+    ],
+    finishVisit: [
+      "джарвиз завершай прием", "джарвис завершай прием",
+      "джарвиз заверши прием", "джарвис заверши прием",
+      "джарвиз завершай", "джарвис завершай",
+    ],
+    confirmYes: ["джарвиз да подтверждаю", "да подтверждаю", "да"],
+    confirmNo: ["джарвиз нет", "нет", "не подтверждаю"],
+    analyzePage: [
+      "джарвиз проверь страницу",
+      "джарвиз анализ страницы",
+      "джарвиз я вошел",
+      "джарвиз вход выполнен",
+    ],
+    analyzeSchedule: [
+      "джарвиз проверь расписание",
+      "джарвиз проверь занятость",
+      "джарвиз проверь свободные окна",
+      "джарвиз проверь записи к докторам",
+    ],
+    placeSlot: [
+      "джарвиз поставь на", "джарвиз поставь в", "джарвиз запиши на", "джарвиз перезапиши на",
+      "джарвис поставь на", "джарвис поставь в", "джарвис запиши на", "джарвис перезапиши на",
+      "поставь на", "запиши на",
+    ],
+    resetFlow: ["джарвиз сбрось прием", "джарвиз сброс сценария", "джарвиз очисти прием"],
+  };
+
+  function getVoiceConfig() {
+    const external = window.JarvisVoiceConfig;
+    if (!external || typeof external !== "object") {
+      return COMMAND_DEFAULTS;
+    }
+
+    const externalCommands =
+      external.commands && typeof external.commands === "object" ? external.commands : {};
+
+    const cfg = {
+      wakeWords: Array.isArray(external.wakeWords)
+        ? external.wakeWords.map((item) => normalizeText(item)).filter(Boolean)
+        : COMMAND_DEFAULTS.wakeWords,
+    };
+
+    Object.keys(COMMAND_DEFAULTS).forEach((key) => {
+      if (key === "wakeWords") {
+        return;
+      }
+
+      const custom = externalCommands[key];
+      if (Array.isArray(custom) && custom.length) {
+        cfg[key] = custom.map((item) => normalizeText(item)).filter(Boolean);
+      } else {
+        cfg[key] = COMMAND_DEFAULTS[key];
+      }
+    });
+
+    if (!cfg.wakeWords.length) {
+      cfg.wakeWords = COMMAND_DEFAULTS.wakeWords;
+    }
+
+    return cfg;
+  }
+
+  const VOICE_COMMANDS = getVoiceConfig();
+
+  function matchCommand(normalized, key) {
+    const samples = VOICE_COMMANDS[key] || [];
+    const canonical = normalizeWakeVariants(normalized);
+    const enriched = `${normalized} ${canonical} ${normalized.replace(/джарвис/g, "джарвиз")}`;
+    return includesAny(enriched, samples);
+  }
+
+  function toResponseStatusByStage(stage) {
+    return RESPONSE_STATUS_MAP[stage] || "IDLE";
+  }
+
+  function stageToAction(stage) {
+    if (stage === STAGE.RECORDING_VISIT) {
+      return "start_recording";
+    }
+    if (stage === STAGE.PROCESSING_VISIT) {
+      return "fill_form";
+    }
+    if (
+      stage === STAGE.AWAITING_SCHEDULE_CONFIRMATION ||
+      stage === STAGE.AWAITING_SLOT_SELECTION
+    ) {
+      return "check_schedule";
+    }
+    if (stage === STAGE.AWAITING_VISIT_CONFIRMATION) {
+      return "fill_form";
+    }
+    return "none";
+  }
+
+  function publishResponse(action, speech, data) {
+    const envelope = {
+      action: action || stageToAction(state.stage),
+      speech: String(speech || ""),
+      status: toResponseStatusByStage(state.stage),
+      data: data && typeof data === "object" ? data : {},
+    };
+
+    state.lastResponse = envelope;
+
+    try {
+      window.dispatchEvent(
+        new CustomEvent("jarvis:response", {
+          detail: envelope,
+        })
+      );
+    } catch (_error) {
+    }
+
+    return envelope;
+  }
+
+  function getLastResponseEnvelope() {
+    return (
+      state.lastResponse || {
+        action: "none",
+        speech: "",
+        status: toResponseStatusByStage(state.stage),
+        data: {},
+      }
+    );
+  }
+
+  async function speakAndPublish(action, speech, data, options) {
+    const envelope = publishResponse(action, speech, data);
+
+    if (PREFER_BACKEND_STT && state.backendLoopActive) {
+      await stopBackendTranscriptionLoop();
+    }
+
+    await speak(speech, options);
+
+    if (PREFER_BACKEND_STT && state.listening && !state.narratorSpeaking) {
+      void runBackendTranscriptionLoop();
+    }
+
+    return envelope;
+  }
+
+  function buildAssistantMarkup() {
+    return `
+      <button class="aqb-jarvis-fab" id="aqb-jarvis-fab" type="button">JARVIS</button>
+      <section class="aqb-jarvis-panel" id="aqb-jarvis-panel" aria-live="polite">
+        <header class="aqb-jarvis-head">
+          <div>
+            <p class="aqb-jarvis-eyebrow">Медицинский ассистент</p>
+            <p class="aqb-jarvis-title">JARVIS</p>
+          </div>
+          <button class="aqb-jarvis-minimize" id="aqb-jarvis-minimize" type="button" aria-label="Свернуть">
+            —
+          </button>
+        </header>
+
+        <p class="aqb-jarvis-status" id="aqb-jarvis-status"></p>
+
+        <div class="aqb-jarvis-controls">
+          <button class="aqb-jarvis-talk" id="aqb-jarvis-talk" type="button">Говорить</button>
+          <button class="aqb-jarvis-reset" id="aqb-jarvis-reset" type="button">Сброс приема</button>
+        </div>
+
+        <div class="aqb-jarvis-config">
+          <label class="aqb-jarvis-field">
+            <span>Damumed URL</span>
+            <input id="aqb-jarvis-damumed" type="url" placeholder="https://damumed.kz" />
+          </label>
+          <label class="aqb-jarvis-field">
+            <span>Песочница URL</span>
+            <input id="aqb-jarvis-sandbox" type="url" placeholder="https://your-sandbox.example" />
+          </label>
+          <label class="aqb-jarvis-field">
+            <span>Local AI endpoint</span>
+            <input id="aqb-jarvis-local-ai" type="url" placeholder="http://127.0.0.1:8000/process-visit" />
+          </label>
+          <button class="aqb-jarvis-save" id="aqb-jarvis-save" type="button">Сохранить настройки</button>
+        </div>
+
+        <section class="aqb-jarvis-block">
+          <p class="aqb-jarvis-block-title">Лента записи</p>
+          <div class="aqb-jarvis-transcript" id="aqb-jarvis-transcript"></div>
+        </section>
+
+        <section class="aqb-jarvis-block">
+          <p class="aqb-jarvis-block-title">Черновик осмотра</p>
+          <div class="aqb-jarvis-draft" id="aqb-jarvis-draft"></div>
+        </section>
+
+        <section class="aqb-jarvis-block">
+          <p class="aqb-jarvis-block-title">Smart Scheduling (9 рабочих дней)</p>
+          <div class="aqb-jarvis-schedule" id="aqb-jarvis-schedule"></div>
+        </section>
+      </section>
+    `;
+  }
+
+  function stageLabel() {
+    return STAGE_TITLES[state.stage] || STAGE_TITLES[STAGE.IDLE];
+  }
+
+  function renderStatus() {
+    if (!refs.status) {
+      return;
+    }
+
+    const narratorPart = state.narratorSpeaking ? "диктор говорит" : "диктор молчит";
+    const micPart = state.listening ? "микрофон активен" : "микрофон выключен";
+    const sttPart = state.sttBusy ? "слушаю..." : "ожидаю";
+    refs.status.textContent = `${stageLabel()} • ${micPart} • ${narratorPart} • ${sttPart}`;
+  }
+
+  function renderButtons() {
+    if (refs.talkButton) {
+      refs.talkButton.textContent = state.listening ? "Остановить" : "Говорить";
+      refs.talkButton.classList.toggle("listening", state.listening);
+    }
+  }
+
+  function renderPanel() {
+    if (!refs.panel) {
+      return;
+    }
+    refs.panel.classList.toggle("collapsed", state.panelCollapsed);
+  }
+
+  function renderTranscript() {
+    if (!refs.transcript) {
+      return;
+    }
+
+    if (state.transcript.length === 0) {
+      refs.transcript.innerHTML = `<p class="aqb-jarvis-empty">Нажмите «Говорить» и скажите «Открой сайт Damumed».</p>`;
+      return;
+    }
+
+    refs.transcript.innerHTML = trimArray(state.transcript, 28)
+      .map((item) => {
+        const speaker = item.author === JARVIS_AUTHOR ? "JARVIS" : "Голос";
+        const modifier = item.author === JARVIS_AUTHOR ? "jarvis" : "voice";
+        return `
+          <article class="aqb-jarvis-line ${modifier}">
+            <p class="aqb-jarvis-speaker">${speaker}</p>
+            <p class="aqb-jarvis-message">${escapeHtml(item.text)}</p>
+          </article>
+        `;
+      })
+      .join("");
+
+    refs.transcript.scrollTop = refs.transcript.scrollHeight;
+  }
+
+  function renderDraft() {
+    if (!refs.draft) {
+      return;
+    }
+
+    const draft = state.visitDraft;
+    if (!draft) {
+      refs.draft.innerHTML = `<p class="aqb-jarvis-empty">После команды «Джарвиз завершай» тут появится структурированный осмотр.</p>`;
+      return;
+    }
+
+    refs.draft.innerHTML = `
+      <article class="aqb-jarvis-draft-card">
+        <p><strong>Пациент:</strong> ${escapeHtml(draft.patient)}</p>
+        <p><strong>Жалобы:</strong> ${escapeHtml(draft.complaints)}</p>
+        <p><strong>Анамнез:</strong> ${escapeHtml(draft.anamnesis)}</p>
+        <p><strong>Объективно:</strong> ${escapeHtml(draft.objective)}</p>
+        <p><strong>Диагноз:</strong> ${escapeHtml(draft.diagnosis)}</p>
+        <p><strong>Назначения:</strong> ${escapeHtml(draft.treatment)}</p>
+        <p><strong>Дневник:</strong> ${escapeHtml(draft.diary)}</p>
+      </article>
+    `;
+  }
+
+  function renderSchedule() {
+    if (!refs.schedule) {
+      return;
+    }
+
+    if (!state.scheduleGrid.length && !state.runtimeSlots.length) {
+      refs.schedule.innerHTML = `<p class="aqb-jarvis-empty">Расписание сгенерируется после подтверждения осмотра.</p>`;
+      return;
+    }
+
+    if (state.runtimeSlots.length) {
+      refs.schedule.innerHTML = state.runtimeSlots
+        .slice(0, 60)
+        .map((item) => {
+          const modifier = item.status === "free" ? "ok" : item.status === "busy" ? "wait" : "";
+          const statusText =
+            item.status === "free" ? "Свободно" : item.status === "busy" ? "Занято" : "Нужно уточнить";
+
+          return `
+            <article class="aqb-jarvis-schedule-row ${modifier}">
+              <p><strong>${escapeHtml(item.dateLabel)}</strong> • ${escapeHtml(item.specialist)}</p>
+              <p>${escapeHtml(item.slotLabel)} (${item.duration} мин)</p>
+              <p>${escapeHtml(statusText)}</p>
+            </article>
+          `;
+        })
+        .join("");
+      return;
+    }
+
+    refs.schedule.innerHTML = state.scheduleGrid
+      .map((item) => {
+        const modifier = item.status === "ok" ? "ok" : "wait";
+        return `
+          <article class="aqb-jarvis-schedule-row ${modifier}">
+            <p><strong>${escapeHtml(item.dateLabel)}</strong> • ${escapeHtml(item.procedure)}</p>
+            <p>${escapeHtml(item.specialist)}</p>
+            <p>${escapeHtml(item.slotLabel)} (${item.duration} мин)</p>
+          </article>
+        `;
+      })
+      .join("");
+  }
+
+  function renderConfig() {
+    if (refs.damumedInput) {
+      refs.damumedInput.value = state.config.damumedUrl || "";
+    }
+    if (refs.sandboxInput) {
+      refs.sandboxInput.value = state.config.sandboxUrl || "";
+    }
+    if (refs.localAiInput) {
+      refs.localAiInput.value = state.config.localAiUrl || "";
+    }
+  }
+
+  function renderAll() {
+    renderPanel();
+    renderStatus();
+    renderButtons();
+    renderTranscript();
+    renderDraft();
+    renderSchedule();
+  }
+
+  function pushTranscript(author, text) {
+    const value = String(text || "").trim();
+    if (!value) {
+      return;
+    }
+
+    state.transcript.push({
+      author,
+      text: value,
+      timestamp: Date.now(),
+    });
+
+    state.transcript = trimArray(state.transcript, MAX_TRANSCRIPT_ITEMS);
+    queuePersist();
+    renderTranscript();
+  }
+
+  async function persistState() {
+    const snapshot = {
+      stage: state.stage,
+      transcript: state.transcript,
+      visitLines: state.visitLines,
+      visitDraft: state.visitDraft,
+      scheduleGrid: state.scheduleGrid,
+      runtimeSlots: state.runtimeSlots,
+      pendingSuggestedSlot: state.pendingSuggestedSlot,
+      pendingSlotRequest: state.pendingSlotRequest,
+      awaitingVoiceConfirm: state.awaitingVoiceConfirm,
+      strictVisitPending: state.strictVisitPending,
+      patientHint: state.patientHint,
+      pendingSiteCheck: state.pendingSiteCheck,
+      panelCollapsed: state.panelCollapsed,
+      lastHeardText: state.lastHeardText,
+      lastHeardAt: state.lastHeardAt,
+    };
+
+    await storageSet({
+      [STORAGE_KEYS.session]: snapshot,
+    });
+  }
+
+  function queuePersist() {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+    }
+
+    persistTimer = window.setTimeout(() => {
+      persistTimer = null;
+      void persistState();
+    }, 200);
+  }
+
+  function normalizeConfiguredUrl(url) {
+    const value = String(url || "").trim();
+    if (!value) {
+      return "";
+    }
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return "";
+      }
+      return parsed.toString();
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function toApiBaseUrl(url) {
+    const normalized = normalizeConfiguredUrl(url);
+    if (!normalized) {
+      return "";
+    }
+
+    try {
+      return new URL(normalized).origin;
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function urlsMatch(currentUrl, configuredUrl) {
+    const normalized = normalizeConfiguredUrl(configuredUrl);
+    if (!normalized) {
+      return false;
+    }
+
+    try {
+      const current = new URL(currentUrl);
+      const target = new URL(normalized);
+      if (current.origin !== target.origin) {
+        return false;
+      }
+
+      const expectedPath = target.pathname.replace(/\/$/, "");
+      if (!expectedPath) {
+        return true;
+      }
+      return current.pathname.startsWith(expectedPath);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function detectSiteByLocation() {
+    const current = window.location.href;
+
+    if (urlsMatch(current, state.config.damumedUrl) || /damumed/i.test(current)) {
+      return "damumed";
+    }
+
+    if (urlsMatch(current, state.config.sandboxUrl)) {
+      return "sandbox";
+    }
+
+    return "other";
+  }
+
+  function analyzeCurrentPage() {
+    const site = detectSiteByLocation();
+    if (site === "other") {
+      return {
+        site,
+        loginRequired: false,
+        ready: false,
+      };
+    }
+
+    const passwordField = document.querySelector("input[type='password']");
+    const authInput = document.querySelector(
+      "input[type='email'], input[type='tel'], input[name*='login'], input[id*='login'], input[placeholder*='логин'], input[placeholder*='почт'], input[placeholder*='телефон'], input[placeholder*='email']"
+    );
+
+    const submitLike = [...document.querySelectorAll("button, input[type='submit'], a")].some((el) => {
+      const text = normalizeText(el.textContent || el.value || "");
+      return includesAny(text, ["войти", "логин", "sign in", "login", "авториза"]);
+    });
+
+    const bodyText = normalizeText((document.body && document.body.innerText) || "");
+    const hasVisitContext = includesAny(bodyText, [
+      "кабинет",
+      "прием",
+      "пациент",
+      "карточка",
+      "appointment",
+      "dashboard",
+    ]);
+
+    const loginRequired = Boolean(passwordField) || Boolean(authInput && submitLike);
+    const ready = !loginRequired && hasVisitContext;
+
+    return {
+      site,
+      loginRequired,
+      ready,
+    };
+  }
+
+  function stopLoginWatcher() {
+    if (loginWatchTimer) {
+      clearInterval(loginWatchTimer);
+      loginWatchTimer = null;
+    }
+  }
+
+  function startLoginWatcher() {
+    stopLoginWatcher();
+
+    loginWatchTimer = window.setInterval(() => {
+      if (state.stage !== STAGE.AWAITING_LOGIN) {
+        stopLoginWatcher();
+        return;
+      }
+
+      const analysis = analyzeCurrentPage();
+      if (analysis.site === "other") {
+        return;
+      }
+
+      if (!analysis.loginRequired) {
+        extractSlotsFromPageDom();
+        stopLoginWatcher();
+        state.stage = STAGE.COMMAND;
+        queuePersist();
+        renderAll();
+        void speakAndPublish("open_site", "Вход выполнен. Скажите: Джарвиз начни прием", {
+          site: analysis.site,
+          loginRequired: false,
+        }, {
+          resume: state.listening,
+        });
+      }
+    }, 3000);
+  }
+
+  async function loadStoredState() {
+    const data = await storageGet([
+      STORAGE_KEYS.damumedUrl,
+      STORAGE_KEYS.sandboxUrl,
+      STORAGE_KEYS.localAiUrl,
+      STORAGE_KEYS.session,
+    ]);
+
+    state.config.damumedUrl = normalizeConfiguredUrl(data[STORAGE_KEYS.damumedUrl]) || DEFAULTS.damumedUrl;
+    state.config.sandboxUrl =
+      normalizeConfiguredUrl(data[STORAGE_KEYS.sandboxUrl]) || DEFAULTS.sandboxUrl;
+    state.config.localAiUrl =
+      normalizeConfiguredUrl(data[STORAGE_KEYS.localAiUrl]) || DEFAULTS.localAiUrl;
+
+    const saved = data[STORAGE_KEYS.session];
+    if (saved && typeof saved === "object") {
+      state.stage = STAGE_TITLES[saved.stage] ? saved.stage : STAGE.IDLE;
+      state.transcript = Array.isArray(saved.transcript) ? trimArray(saved.transcript, MAX_TRANSCRIPT_ITEMS) : [];
+      state.visitLines = Array.isArray(saved.visitLines) ? trimArray(saved.visitLines, 400) : [];
+      state.visitDraft = saved.visitDraft && typeof saved.visitDraft === "object" ? saved.visitDraft : null;
+      state.scheduleGrid = Array.isArray(saved.scheduleGrid) ? saved.scheduleGrid : [];
+      state.runtimeSlots = Array.isArray(saved.runtimeSlots) ? saved.runtimeSlots : [];
+      state.pendingSuggestedSlot =
+        saved.pendingSuggestedSlot && typeof saved.pendingSuggestedSlot === "object"
+          ? saved.pendingSuggestedSlot
+          : null;
+      state.pendingSlotRequest =
+        saved.pendingSlotRequest && typeof saved.pendingSlotRequest === "object"
+          ? saved.pendingSlotRequest
+          : null;
+      state.awaitingVoiceConfirm =
+        saved.awaitingVoiceConfirm && typeof saved.awaitingVoiceConfirm === "object"
+          ? saved.awaitingVoiceConfirm
+          : null;
+      state.strictVisitPending = Boolean(saved.strictVisitPending);
+      state.patientHint = typeof saved.patientHint === "string" ? saved.patientHint : "";
+      state.pendingSiteCheck = typeof saved.pendingSiteCheck === "string" ? saved.pendingSiteCheck : null;
+      state.panelCollapsed = Boolean(saved.panelCollapsed);
+      state.lastHeardText = typeof saved.lastHeardText === "string" ? saved.lastHeardText : "";
+      state.lastHeardAt = Number(saved.lastHeardAt) || 0;
+    }
+
+    if (state.stage === STAGE.PROCESSING_VISIT) {
+      state.stage = state.visitDraft ? STAGE.AWAITING_VISIT_CONFIRMATION : STAGE.COMMAND;
+    }
+  }
+
+  function mountAssistant() {
+    const existing = document.getElementById(ASSISTANT_ROOT_ID);
+    if (existing) {
+      existing.remove();
+    }
+
+    const host = document.body || document.documentElement;
+    if (!host) {
+      return;
+    }
+
+    const root = document.createElement("section");
+    root.id = ASSISTANT_ROOT_ID;
+    root.innerHTML = buildAssistantMarkup();
+    host.appendChild(root);
+
+    refs.root = root;
+    refs.panel = root.querySelector("#aqb-jarvis-panel");
+    refs.fab = root.querySelector("#aqb-jarvis-fab");
+    refs.status = root.querySelector("#aqb-jarvis-status");
+    refs.talkButton = root.querySelector("#aqb-jarvis-talk");
+    refs.resetButton = root.querySelector("#aqb-jarvis-reset");
+    refs.saveConfigButton = root.querySelector("#aqb-jarvis-save");
+    refs.damumedInput = root.querySelector("#aqb-jarvis-damumed");
+    refs.sandboxInput = root.querySelector("#aqb-jarvis-sandbox");
+    refs.localAiInput = root.querySelector("#aqb-jarvis-local-ai");
+    refs.transcript = root.querySelector("#aqb-jarvis-transcript");
+    refs.draft = root.querySelector("#aqb-jarvis-draft");
+    refs.schedule = root.querySelector("#aqb-jarvis-schedule");
+    refs.minimize = root.querySelector("#aqb-jarvis-minimize");
+
+    refs.fab?.addEventListener("click", () => {
+      state.panelCollapsed = !state.panelCollapsed;
+      renderPanel();
+      queuePersist();
+    });
+
+    refs.minimize?.addEventListener("click", () => {
+      state.panelCollapsed = true;
+      renderPanel();
+      queuePersist();
+    });
+
+    refs.talkButton?.addEventListener("click", () => {
+      void toggleListening();
+    });
+
+    refs.resetButton?.addEventListener("click", () => {
+      void resetVisitFlow();
+    });
+
+    refs.saveConfigButton?.addEventListener("click", () => {
+      void saveConfigFromInputs();
+    });
+
+    renderConfig();
+    renderAll();
+  }
+
+  async function saveConfigFromInputs() {
+    if (!refs.damumedInput || !refs.sandboxInput || !refs.localAiInput) {
+      return;
+    }
+
+    const damumedUrl = normalizeConfiguredUrl(refs.damumedInput.value);
+    const sandboxUrl = normalizeConfiguredUrl(refs.sandboxInput.value);
+    const localAiRaw = String(refs.localAiInput.value || "").trim();
+    const localAiUrl = localAiRaw ? normalizeConfiguredUrl(localAiRaw) : "";
+
+    if (!damumedUrl || !sandboxUrl) {
+      pageToast("Проверьте URL: нужны корректные http/https адреса.");
+      return;
+    }
+
+    if (localAiRaw && !localAiUrl) {
+      pageToast("Local AI endpoint должен быть корректным URL или пустым.");
+      return;
+    }
+
+    state.config.damumedUrl = damumedUrl;
+    state.config.sandboxUrl = sandboxUrl;
+    state.config.localAiUrl = localAiUrl;
+
+    await storageSet({
+      [STORAGE_KEYS.damumedUrl]: damumedUrl,
+      [STORAGE_KEYS.sandboxUrl]: sandboxUrl,
+      [STORAGE_KEYS.localAiUrl]: localAiUrl,
+    });
+
+    queuePersist();
+    pageToast("Настройки ассистента сохранены.");
+  }
+
+  function stopRecognitionRuntime() {
+    if (!state.recognition || !state.recognitionRunning) {
+      return;
+    }
+
+    try {
+      state.recognition.stop();
+    } catch (_error) {
+    }
+    state.recognitionRunning = false;
+  }
+
+  function getSpeechRecognitionCtor() {
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  }
+
+  async function stopBackendTranscriptionLoop() {
+    state.backendStopRequested = true;
+    state.backendLoopActive = false;
+    state.sttBusy = false;
+
+    if (state.backendRecorder) {
+      try {
+        if (state.backendRecorder.state === "recording") {
+          state.backendRecorder.stop();
+        }
+      } catch (_error) {
+      }
+    }
+
+    state.backendRecorder = null;
+
+    if (state.backendStream) {
+      try {
+        state.backendStream.getTracks().forEach((track) => track.stop());
+      } catch (_error) {
+      }
+    }
+
+    state.backendStream = null;
+    renderAll();
+  }
+
+  function backendTranscribeBlob(blob) {
+    return new Promise((resolve) => {
+      if (!blob || blob.size === 0) {
+        resolve("");
+        return;
+      }
+
+      const done = (text) => resolve(String(text || "").trim());
+
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        try {
+          const bytes = new Uint8Array(reader.result || new ArrayBuffer(0));
+          const base64 = btoa(String.fromCharCode(...bytes));
+          const bridge = window.AqbobekBridge;
+
+          if (!bridge || typeof bridge.request !== "function") {
+            done("");
+            return;
+          }
+
+          const response = await bridge.request("/api/transcribe-base64", {
+            method: "POST",
+            body: {
+              audio_base64: base64,
+              mime_type: blob.type || "audio/webm",
+            },
+          });
+
+          if (!response || !response.ok) {
+            done("");
+            return;
+          }
+
+          const text =
+            response.data && typeof response.data === "object"
+              ? response.data.text || ""
+              : "";
+          done(text);
+        } catch (_error) {
+          done("");
+        }
+      };
+      reader.onerror = () => resolve("");
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  async function runBackendTranscriptionLoop() {
+    if (!state.listening || state.narratorSpeaking || state.backendLoopActive) {
+      return;
+    }
+
+    state.backendStopRequested = false;
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === "undefined") {
+      state.recognitionError = "media-not-supported";
+      pageToast("Браузер не поддерживает запись микрофона через MediaRecorder.");
+      return;
+    }
+
+    try {
+      state.backendStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    } catch (_error) {
+      state.listening = false;
+      state.recognitionError = "not-allowed";
+      renderAll();
+      pageToast("Нет доступа к микрофону. Разрешите микрофон для сайта и нажмите Говорить снова.");
+      return;
+    }
+
+    state.backendLoopActive = true;
+    renderAll();
+
+      while (state.listening && !state.backendStopRequested && !state.narratorSpeaking) {
+      state.sttBusy = true;
+      renderAll();
+      const chunkText = await new Promise((resolve) => {
+        let settled = false;
+        const chunks = [];
+
+        const finalize = async () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          const blob = new Blob(chunks, { type: "audio/webm" });
+          const text = await backendTranscribeBlob(blob);
+          resolve(text);
+        };
+
+        try {
+          const recorder = new MediaRecorder(state.backendStream, { mimeType: "audio/webm" });
+          state.backendRecorder = recorder;
+
+          recorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+              chunks.push(event.data);
+            }
+          };
+
+          recorder.onerror = () => {
+            if (!settled) {
+              settled = true;
+              resolve("");
+            }
+          };
+
+          recorder.onstop = () => {
+            void finalize();
+          };
+
+          recorder.start();
+
+          window.setTimeout(() => {
+            try {
+              if (recorder.state === "recording") {
+                recorder.stop();
+              }
+            } catch (_error) {
+              if (!settled) {
+                settled = true;
+                resolve("");
+              }
+            }
+          }, BACKEND_STT_CHUNK_MS);
+        } catch (_error) {
+          if (!settled) {
+            settled = true;
+            resolve("");
+          }
+        }
+      });
+
+      if (!state.listening || state.backendStopRequested) {
+        break;
+      }
+
+      state.sttBusy = false;
+      renderAll();
+
+      if (chunkText && chunkText.length >= BACKEND_STT_MIN_TEXT_CHARS) {
+        state.recognitionError = "";
+        enqueueVoiceText(chunkText);
+      }
+    }
+
+    state.sttBusy = false;
+    renderAll();
+    await stopBackendTranscriptionLoop();
+  }
+
+  function ensureRecognition() {
+    if (state.recognition) {
+      return true;
+    }
+
+    const Recognition = getSpeechRecognitionCtor();
+    if (!Recognition) {
+      return false;
+    }
+
+    const recognition = new Recognition();
+    recognition.lang = "ru-RU";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event) => {
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        if (!result.isFinal) {
+          continue;
+        }
+
+        const text = (result[0] && result[0].transcript) || "";
+        const normalized = text.trim();
+        if (normalized) {
+          enqueueVoiceText(normalized);
+        }
+      }
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === "no-speech") {
+        return;
+      }
+
+      state.recognitionError = String(event.error || "");
+
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        state.listening = false;
+        stopRecognitionRuntime();
+        renderAll();
+        pageToast("Нужен доступ к микрофону в настройках браузера.");
+        return;
+      }
+
+      if (event.error === "network") {
+        state.listening = false;
+        stopRecognitionRuntime();
+        renderAll();
+        pageToast("Ошибка распознавания: network. Откройте localhost:4173 по HTTP, разрешите микрофон и нажмите Говорить снова.");
+        return;
+      }
+
+      pageToast(`Ошибка распознавания: ${event.error}`);
+    };
+
+    recognition.onend = () => {
+      state.recognitionRunning = false;
+      renderAll();
+
+      if (state.listening && !state.narratorSpeaking) {
+        startRecognitionRuntime();
+      }
+    };
+
+    state.recognition = recognition;
+    return true;
+  }
+
+  function startRecognitionRuntime() {
+    if (!ensureRecognition()) {
+      pageToast("SpeechRecognition недоступен в этом браузере.");
+      state.listening = false;
+      renderAll();
+      return;
+    }
+
+    if (state.recognitionRunning || state.narratorSpeaking) {
+      return;
+    }
+
+    try {
+      state.recognition.start();
+      state.recognitionRunning = true;
+      renderAll();
+    } catch (error) {
+      const message = String(error || "");
+      if (!/already started/i.test(message)) {
+        pageToast("Не удалось включить микрофон.");
+      }
+    }
+  }
+
+  function speak(text, options) {
+    const value = String(text || "").trim();
+    if (!value) {
+      return Promise.resolve();
+    }
+
+    console.log("[JARVIS speak() called]", value.slice(0, 80));
+    const resume = !options || options.resume !== false;
+    const shouldResume = Boolean(resume && state.listening);
+
+    pushTranscript(JARVIS_AUTHOR, value);
+
+    stopRecognitionRuntime();
+    state.narratorSpeaking = true;
+    renderAll();
+
+    const synth = window.speechSynthesis;
+    const Utterance = window.SpeechSynthesisUtterance;
+    if (!synth || typeof Utterance === "undefined") {
+      state.narratorSpeaking = false;
+      if (shouldResume) {
+        if (PREFER_BACKEND_STT) {
+          void runBackendTranscriptionLoop();
+        } else {
+          startRecognitionRuntime();
+        }
+      }
+      renderAll();
+      return Promise.resolve();
+    }
+
+    synth.cancel();
+
+    return new Promise((resolve) => {
+      const utterance = new Utterance(value);
+      utterance.lang = "ru-RU";
+      utterance.rate = 1;
+      utterance.pitch = 1;
+
+      let finalized = false;
+      const finalize = (reason) => {
+        if (finalized) return;
+        finalized = true;
+        clearTimeout(ttsTimeoutId);
+        console.log("[JARVIS TTS end]", reason || "ok", value.slice(0, 60));
+        state.narratorSpeaking = false;
+        renderAll();
+        if (shouldResume) {
+          if (PREFER_BACKEND_STT) {
+            // Restart backend Whisper loop instead of native SpeechRecognition
+            // (native fails with "network" on HTTP localhost)
+            void runBackendTranscriptionLoop();
+          } else {
+            startRecognitionRuntime();
+          }
+        }
+        resolve();
+      };
+
+      utterance.onend = () => finalize("onend");
+      utterance.onerror = (e) => {
+        console.error("[JARVIS TTS error]", e.error, value.slice(0, 60));
+        finalize("onerror");
+      };
+
+      // Fallback: if TTS hangs (Chrome MV3 bug), force-unblock after 8s
+      const ttsTimeoutId = window.setTimeout(() => finalize("timeout"), 8000);
+
+      synth.speak(utterance);
+      console.log("[JARVIS TTS speak]", value.slice(0, 80));
+    });
+  }
+
+  async function startListening() {
+    if (!ensureRecognition()) {
+      pageToast("Ваш браузер не поддерживает распознавание речи.");
+      return;
+    }
+
+    state.listening = true;
+    state.recognitionError = "";
+    state.sttBusy = false;
+    renderAll();
+
+    if (PREFER_BACKEND_STT) {
+      void runBackendTranscriptionLoop();
+      return;
+    }
+
+    if (state.transcript.length === 0) {
+      await speakAndPublish("none", "Голосовой режим активирован. Ожидаю команду с ключевым словом Джарвиз", {}, {
+        resume: true,
+      });
+      return;
+    }
+
+    startRecognitionRuntime();
+  }
+
+  function stopListening() {
+    state.listening = false;
+    state.sttBusy = false;
+    void stopBackendTranscriptionLoop();
+    stopRecognitionRuntime();
+    renderAll();
+    pageToast("Микрофон выключен.");
+  }
+
+  async function toggleListening() {
+    if (state.listening) {
+      stopListening();
+      return;
+    }
+    await startListening();
+  }
+
+  function containsWakeWord(normalized) {
+    const canonical = normalizeWakeVariants(normalized);
+    const enriched = `${normalized} ${canonical} ${normalized.replace(/джарвис/g, "джарвиз")}`;
+    if (includesAny(enriched, VOICE_COMMANDS.wakeWords)) {
+      return true;
+    }
+
+    const tokens = canonical.split(" ").filter(Boolean);
+    if (tokens.some(
+      (token) => token.startsWith("джарв") || token.startsWith("jarv") || token.startsWith("ярв")
+    )) {
+      return true;
+    }
+
+    return tokens.some((token) =>
+      token.startsWith("джарл") || token.startsWith("жарв") || token.startsWith("jarl")
+    );
+  }
+
+  function isWakeOnlyCommand(normalized) {
+    const canonical = normalizeWakeVariants(normalized);
+    if (!canonical) {
+      return false;
+    }
+
+    return (VOICE_COMMANDS.wakeWords || []).some(
+      (wakeWord) => normalizeWakeVariants(wakeWord) === canonical
+    );
+  }
+
+  async function processWithoutWakeWord(text, normalized) {
+    if (state.stage === STAGE.RECORDING_VISIT) {
+      appendVisitLine(text);
+      console.log("[JARVIS visit line]", text.slice(0, 60));
+      return true;
+    }
+
+    if (state.stage === STAGE.AWAITING_VISIT_CONFIRMATION) {
+      if (isYesCommand(normalized) || isNoCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await handleVisitConfirmation(normalized);
+        return true;
+      }
+      return false;
+    }
+
+    if (state.stage === STAGE.AWAITING_SCHEDULE_CONFIRMATION) {
+      if (isYesCommand(normalized) || isNoCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await handleScheduleConfirmation(normalized);
+        return true;
+      }
+      return false;
+    }
+
+    if (state.stage === STAGE.AWAITING_SLOT_SELECTION) {
+      if (isAnalyzeScheduleCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await announceCurrentAvailability();
+        return true;
+      }
+
+      if (
+        isPlaceSlotCommand(normalized) ||
+        parseRequestedSlot(normalized) ||
+        isYesCommand(normalized) ||
+        isNoCommand(normalized)
+      ) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await applyRequestedSlot(normalized);
+        return true;
+      }
+
+      return false;
+    }
+
+    return false;
+  }
+
+  function isOpenDamumedCommand(normalized) {
+    return matchCommand(normalized, "openDamumed");
+  }
+
+  function isOpenSandboxCommand(normalized) {
+    return matchCommand(normalized, "openSandbox");
+  }
+
+  function isOpenVisitCommand(normalized) {
+    return matchCommand(normalized, "startVisit");
+  }
+
+  function isFinishVisitCommand(normalized) {
+    return matchCommand(normalized, "finishVisit");
+  }
+
+  function isYesCommand(normalized) {
+    return matchCommand(normalized, "confirmYes");
+  }
+
+  function isNoCommand(normalized) {
+    return matchCommand(normalized, "confirmNo");
+  }
+
+  function isAnalyzePageCommand(normalized) {
+    return matchCommand(normalized, "analyzePage");
+  }
+
+  function isAnalyzeScheduleCommand(normalized) {
+    return matchCommand(normalized, "analyzeSchedule");
+  }
+
+  function isPlaceSlotCommand(normalized) {
+    return (
+      matchCommand(normalized, "placeSlot") ||
+      includesAny(normalized, [
+        "поставь на",
+        "поставь в",
+        "запиши на",
+        "перезапиши на",
+        "посади на",
+        "посадить на",
+        "посадит на",
+        "спасать на",
+        "поставь",
+      ])
+    );
+  }
+
+  function isResetFlowCommand(normalized) {
+    return matchCommand(normalized, "resetFlow");
+  }
+
+  function shouldExplicitWakeForVisit(normalized) {
+    if (!isOpenVisitCommand(normalized)) {
+      return false;
+    }
+    return !containsWakeWord(normalized);
+  }
+
+  function extractPatientHint(rawText) {
+    const normalized = String(rawText || "").trim();
+    const match = normalized.match(/для\s+(.+)/i);
+    if (!match || !match[1]) {
+      return "";
+    }
+    return match[1].trim();
+  }
+
+  function analyzeRequestedSite(target) {
+    const currentSite = detectSiteByLocation();
+    if (target === "damumed" && currentSite !== "damumed") {
+      return null;
+    }
+    if (target === "sandbox" && currentSite !== "sandbox") {
+      return null;
+    }
+    return analyzeCurrentPage();
+  }
+
+  async function applySiteAnalysis(analysis, announce) {
+    if (!analysis || analysis.site === "other") {
+      if (announce) {
+        await speakAndPublish("open_site", "Сейчас открыт другой сайт. Скажите: Джарвиз открой дамумед или Джарвиз открой песочницу.", {
+          site: "other",
+        }, {
+          resume: state.listening,
+        });
+      }
+      return;
+    }
+
+    if (analysis.loginRequired) {
+      state.stage = STAGE.AWAITING_LOGIN;
+      queuePersist();
+      renderAll();
+      startLoginWatcher();
+
+      if (announce) {
+        await speakAndPublish("open_site", "Требуется вход в систему", {
+          site: analysis.site,
+          loginRequired: true,
+        }, {
+          resume: state.listening,
+        });
+      }
+      return;
+    }
+
+    stopLoginWatcher();
+    state.stage = STAGE.COMMAND;
+    queuePersist();
+    renderAll();
+
+    if (announce) {
+      extractSlotsFromPageDom();
+      await speakAndPublish("open_site", "Вход выполнен. Скажите: Джарвиз начни прием", {
+        site: analysis.site,
+        loginRequired: false,
+      }, { resume: state.listening });
+    }
+  }
+
+  async function openSiteCommand(target) {
+    const targetUrl = target === "damumed" ? state.config.damumedUrl : state.config.sandboxUrl;
+    const normalizedUrl = normalizeConfiguredUrl(targetUrl);
+
+    if (!normalizedUrl) {
+      await speakAndPublish("open_site", "Адрес сайта не задан. Укажите URL в настройках расширения.", {
+        target,
+        ok: false,
+      }, {
+        resume: state.listening,
+      });
+      return;
+    }
+
+    state.stage = STAGE.IDLE;
+    state.pendingSiteCheck = target;
+    queuePersist();
+    renderAll();
+
+    await speakAndPublish("open_site", "Открываю сайт", {
+      target,
+      url: normalizedUrl,
+    }, { resume: false });
+
+    console.log("[JARVIS navigate]", normalizedUrl);
+    // Open in new/existing tab via background so mic on current tab is not killed
+    try {
+      chrome.runtime.sendMessage({ type: "assistant:navigateTab", url: normalizedUrl });
+    } catch (_e) {
+      // Fallback: navigate current tab
+      window.location.assign(normalizedUrl);
+    }
+  }
+
+  function clickElementSafe(element) {
+    if (!element) {
+      return false;
+    }
+
+    const action = () => {
+      element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      if (typeof element.click === "function") {
+        element.click();
+      }
+    };
+
+    try {
+      action();
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  function toSelectorQuery(selectors) {
+    if (Array.isArray(selectors)) {
+      return selectors.join(", ");
+    }
+    return String(selectors || "");
+  }
+
+  function queryAllBySelectors(selectors, root) {
+    const scope = root || document;
+    const query = toSelectorQuery(selectors);
+    if (!query) {
+      return [];
+    }
+
+    try {
+      return [...scope.querySelectorAll(query)];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function isVisibleNode(node) {
+    if (!node) {
+      return false;
+    }
+
+    const style = window.getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") {
+      return false;
+    }
+
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function getTextFromNode(node) {
+    return normalizeText(node?.textContent || "");
+  }
+
+  function getRichNodeText(node) {
+    if (!node) {
+      return "";
+    }
+
+    const joined = [
+      node.textContent || "",
+      node.getAttribute && node.getAttribute("aria-label"),
+      node.getAttribute && node.getAttribute("title"),
+      node.getAttribute && node.getAttribute("data-testid"),
+      node.className || "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return normalizeText(joined);
+  }
+
+  function findVisibleNodeByText(selectors, samples) {
+    const nodes = queryAllBySelectors(selectors);
+    return nodes.find((node) => {
+      if (!isVisibleNode(node)) {
+        return false;
+      }
+      const text = getRichNodeText(node);
+      return includesAny(text, samples);
+    });
+  }
+
+  function findPatientSearchInput() {
+    const inputs = queryAllBySelectors(DOM_CONFIG.patient.searchSelectors);
+    return (
+      inputs.find((input) => {
+        if (!isVisibleNode(input)) {
+          return false;
+        }
+        if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) {
+          return false;
+        }
+        return !input.disabled && !input.readOnly;
+      }) || null
+    );
+  }
+
+  function applyInputValue(input, value) {
+    if (!input) {
+      return;
+    }
+
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(input),
+      "value"
+    )?.set;
+
+    if (nativeSetter) {
+      nativeSetter.call(input, value);
+    } else {
+      input.value = value;
+    }
+
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter" }));
+    input.blur();
+  }
+
+  function fieldContextText(input) {
+    if (!input) {
+      return "";
+    }
+
+    const labelFromAria = input.getAttribute("aria-label") || "";
+    const placeholder = input.getAttribute("placeholder") || "";
+    const name = input.getAttribute("name") || "";
+    const id = input.id || "";
+
+    let labelText = "";
+    if (id) {
+      const forLabel = document.querySelector(`label[for='${id}']`);
+      labelText = forLabel ? forLabel.textContent || "" : "";
+    }
+
+    if (!labelText) {
+      const parentLabel = input.closest("label");
+      if (parentLabel) {
+        labelText = parentLabel.textContent || "";
+      }
+    }
+
+    return normalizeText(`${labelFromAria} ${placeholder} ${name} ${id} ${labelText}`);
+  }
+
+  function findActionButtonInside(container, selectors, keywords) {
+    const actionCandidates = queryAllBySelectors(selectors, container);
+    const found = actionCandidates.find((node) => {
+      if (!isVisibleNode(node)) {
+        return false;
+      }
+
+      const text = getRichNodeText(node);
+      return includesAny(text, keywords);
+    });
+
+    return found || null;
+  }
+
+  function openAcceptOrStartVisitButton() {
+    const candidate =
+      findVisibleNodeByText(
+      DOM_CONFIG.visit.startButtonSelectors,
+      DOM_CONFIG.visit.startButtonKeywords
+      ) ||
+      findVisibleNodeByText(DOM_CONFIG.interactiveSelectors, DOM_CONFIG.visit.startButtonKeywords);
+
+    if (candidate) {
+      return clickElementSafe(candidate);
+    }
+
+    return false;
+  }
+
+  function locatePatientCards() {
+    const cards = queryAllBySelectors(DOM_CONFIG.patient.cardSelectors);
+    const seen = new Set();
+
+    return cards
+      .filter((card) => {
+        if (!isVisibleNode(card)) {
+          return false;
+        }
+
+        const key = `${card.tagName}-${card.className}-${card.textContent?.slice(0, 120) || ""}`;
+        if (seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+
+        const text = getRichNodeText(card);
+        return text.length > 6 && includesAny(text, DOM_CONFIG.patient.cardTextHints);
+      })
+      .slice(0, 300);
+  }
+
+  function findPatientCardByHint(hint) {
+    const normalizedHint = normalizeText(hint);
+    if (!normalizedHint) {
+      return null;
+    }
+
+    const cards = locatePatientCards();
+    return cards.find((card) => getTextFromNode(card).includes(normalizedHint)) || null;
+  }
+
+function parseDateFromText(normalizedText) {
+    const clean = ` ${normalizedText} `;
+    const now = new Date();
+
+    const isoMatch = clean.match(/(20\d{2})[\-\.\/](\d{1,2})[\-\.\/](\d{1,2})/);
+    if (isoMatch) {
+      const year = Number(isoMatch[1]);
+      const month = Number(isoMatch[2]) - 1;
+      const day = Number(isoMatch[3]);
+      const date = new Date(year, month, day, 0, 0, 0, 0);
+      if (!Number.isNaN(date.getTime())) {
+        return date;
+      }
+    }
+
+    const dmMatch = clean.match(/(\d{1,2})[\.\/-](\d{1,2})(?:[\.\/-](\d{2,4}))?/);
+    if (dmMatch) {
+      const day = Number(dmMatch[1]);
+      const month = Number(dmMatch[2]) - 1;
+      const yearRaw = dmMatch[3] ? Number(dmMatch[3]) : now.getFullYear();
+      const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+      const date = new Date(year, month, day, 0, 0, 0, 0);
+      if (!Number.isNaN(date.getTime())) {
+        return date;
+      }
+    }
+
+    const dayNumberMatch = clean.match(/(?:на|в|к)?\s*(\d{1,2})\s+([а-я]+)/i);
+    if (dayNumberMatch) {
+      const day = Number(dayNumberMatch[1]);
+      const monthWord = normalizeText(dayNumberMatch[2]);
+      const monthIndex = MONTH_WORDS.findIndex((item) => monthWord.includes(item));
+      if (monthIndex >= 0) {
+        const year = now.getFullYear();
+        let date = new Date(year, monthIndex, day, 0, 0, 0, 0);
+        if (date < now) {
+          date = new Date(year + 1, monthIndex, day, 0, 0, 0, 0);
+        }
+        if (!Number.isNaN(date.getTime())) {
+          return date;
+        }
+      }
+    }
+
+    if (clean.includes("сегодня")) {
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    }
+
+    if (clean.includes("завтра")) {
+      const tomorrow = new Date(now);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setHours(0, 0, 0, 0);
+      return tomorrow;
+    }
+
+    const weekdayIndex = WEEKDAY_WORDS.findIndex((item) => clean.includes(item));
+    if (weekdayIndex >= 0) {
+      const weekdayTargets = [1, 2, 3, 4, 5, 6, 0];
+      const target = weekdayTargets[weekdayIndex];
+      const current = now.getDay();
+      let diff = target - current;
+      if (diff <= 0) {
+        diff += 7;
+      }
+      const date = new Date(now);
+      date.setDate(date.getDate() + diff);
+      date.setHours(0, 0, 0, 0);
+      return date;
+    }
+
+    const weekendMap = {
+      понедельник: 1,
+      вторник: 2,
+      среда: 3,
+      четверг: 4,
+      пятница: 5,
+      суббота: 6,
+      воскресенье: 0,
+    };
+
+    const directWeekday = Object.entries(weekendMap).find(([name]) => clean.includes(name));
+    if (directWeekday) {
+      const target = directWeekday[1];
+      const current = now.getDay();
+      let diff = target - current;
+      if (diff <= 0) {
+        diff += 7;
+      }
+      const date = new Date(now);
+      date.setDate(date.getDate() + diff);
+      date.setHours(0, 0, 0, 0);
+      return date;
+    }
+
+    return null;
+  }
+
+  function parseRelativeDateFromText(normalizedText) {
+    const clean = ` ${normalizedText} `;
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+
+    if (clean.includes("послезавтра")) {
+      const date = new Date(now);
+      date.setDate(date.getDate() + 2);
+      return date;
+    }
+
+    return null;
+  }
+
+  function parseDateFromAttributes(node) {
+    if (!node) {
+      return null;
+    }
+
+    const attrs = [
+      node.getAttribute("data-date"),
+      node.getAttribute("datetime"),
+      node.getAttribute("value"),
+      node.getAttribute("title"),
+      node.getAttribute("aria-label"),
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    if (!attrs) {
+      return null;
+    }
+
+    return parseDateFromText(normalizeText(attrs));
+  }
+
+  function parseTimeFromText(normalizedText) {
+    const hhmm = normalizedText.match(/(\d{1,2})[:\.](\d{2})/);
+    if (hhmm) {
+      const hh = Number(hhmm[1]);
+      const mm = Number(hhmm[2]);
+      if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+        return { hour: hh, minute: mm };
+      }
+    }
+
+    // "9 утра", "десять утра"
+    const morningMatch = normalizedText.match(/(?:в\s+)?(\d{1,2})\s+утра/);
+    if (morningMatch) {
+      const hh = Number(morningMatch[1]);
+      if (hh >= 1 && hh <= 12) return { hour: hh === 12 ? 0 : hh, minute: 0 };
+    }
+
+    // "2 дня", "3 дня", "2 вечера"
+    const afternoonMatch = normalizedText.match(/(?:в\s+)?(\d{1,2})\s+(?:дня|вечера)/);
+    if (afternoonMatch) {
+      const hh = Number(afternoonMatch[1]);
+      return { hour: hh < 8 ? hh + 12 : hh, minute: 0 };
+    }
+
+    // word number stems (Whisper transcribes these correctly)
+    const WORD_HOURS = [
+      ["восем", 8], ["девят", 9], ["десят", 10], ["одиннадцат", 11],
+      ["двенадцат", 12], ["тринадцат", 13], ["четырнадцат", 14],
+      ["пятнадцат", 15], ["шестнадцат", 16], ["семнадцат", 17],
+    ];
+    for (const [stem, num] of WORD_HOURS) {
+      if (normalizedText.includes(stem)) return { hour: num, minute: 0 };
+    }
+
+    const hourOnly = normalizedText.match(/(?:в|на)?\s*(\d{1,2})\s*(?:час|ч\b)/);
+    if (hourOnly) {
+      const hh = Number(hourOnly[1]);
+      if (hh >= 0 && hh <= 23) {
+        return { hour: hh, minute: 0 };
+      }
+    }
+
+    // bare number in working-hours range as last resort
+    const bareNum = normalizedText.match(/\b(7|8|9|10|11|12|13|14|15|16|17|18)\b/);
+    if (bareNum) {
+      return { hour: Number(bareNum[1]), minute: 0 };
+    }
+
+    return null;
+  }
+
+  function parseMinuteModifier(normalizedText) {
+    const quarter = normalizedText.match(/(четверт|15\s*мин|15\s*мину)/);
+    if (quarter) {
+      return 15;
+    }
+
+    const half = normalizedText.match(/(пол\s*|половин|30\s*мин|30\s*мину)/);
+    if (half) {
+      return 30;
+    }
+
+    const m45 = normalizedText.match(/(без\s*четверт|45\s*мин|45\s*мину)/);
+    if (m45) {
+      return 45;
+    }
+
+    return 0;
+  }
+
+  function inferTimeWithContext(parsedTime, normalizedText) {
+    if (!parsedTime) {
+      return null;
+    }
+
+    let hour = parsedTime.hour;
+    let minute = parsedTime.minute;
+
+    if (minute === 0) {
+      minute = parseMinuteModifier(normalizedText);
+    }
+
+    const hasMorning = /утр|am/.test(normalizedText);
+    const hasEvening = /вечер|pm/.test(normalizedText);
+    const hasDaytime = /дня|днем|днём/.test(normalizedText);
+    const hasNight = /ноч/.test(normalizedText);
+
+    if ((hasEvening || hasDaytime) && hour < 12) {
+      hour += 12;
+    }
+    if (hasMorning && hour === 12) {
+      hour = 0;
+    }
+    if (hasNight && hour >= 6 && hour <= 11) {
+      hour = hour - 12;
+    }
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return null;
+    }
+
+    return { hour, minute };
+  }
+
+  function parseTimeFromAttributes(node) {
+    if (!node) {
+      return null;
+    }
+
+    const attrs = [
+      node.getAttribute("data-time"),
+      node.getAttribute("datetime"),
+      node.getAttribute("title"),
+      node.getAttribute("aria-label"),
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    if (!attrs) {
+      return null;
+    }
+
+    return parseTimeFromText(normalizeText(attrs));
+  }
+
+  function findDateNearNode(node) {
+    if (!node) {
+      return null;
+    }
+
+    const probes = [
+      node,
+      node.closest("tr"),
+      node.closest("li"),
+      node.closest("[data-date]"),
+      node.closest("[data-testid*='schedule-slot']"),
+      node.parentElement,
+      node.parentElement && node.parentElement.previousElementSibling,
+      node.closest("section") && node.closest("section").querySelector("h3"),
+      node.closest("article") && node.closest("article").querySelector("h3"),
+      node.closest("tbody") && node.closest("tbody").previousElementSibling,
+      node.closest("table") && node.closest("table").querySelector("caption"),
+      node.closest("table") && node.closest("table").querySelector("thead"),
+    ].filter(Boolean);
+
+    for (const probe of probes) {
+      const byAttr = parseDateFromAttributes(probe);
+      if (byAttr) {
+        return byAttr;
+      }
+
+      const byText = parseDateFromText(getRichNodeText(probe));
+      if (byText) {
+        return byText;
+      }
+    }
+
+    let cursor = node;
+    for (let i = 0; i < 7; i += 1) {
+      cursor = cursor && cursor.previousElementSibling;
+      if (!cursor) {
+        break;
+      }
+
+      const byAttr = parseDateFromAttributes(cursor);
+      if (byAttr) {
+        return byAttr;
+      }
+
+      const byText = parseDateFromText(getRichNodeText(cursor));
+      if (byText) {
+        return byText;
+      }
+    }
+
+    return null;
+  }
+
+  function findTimeNearNode(node) {
+    if (!node) {
+      return null;
+    }
+
+    const probes = [
+      node,
+      node.closest("tr"),
+      node.closest("li"),
+      node.closest("[data-time]"),
+      node.parentElement,
+    ].filter(Boolean);
+
+    for (const probe of probes) {
+      const byAttr = parseTimeFromAttributes(probe);
+      if (byAttr) {
+        return byAttr;
+      }
+
+      const byText = parseTimeFromText(getRichNodeText(probe));
+      if (byText) {
+        return byText;
+      }
+    }
+
+    return null;
+  }
+
+  function parseDoctorFromText(normalizedText) {
+    for (const doctor of DOCTOR_DICTIONARY) {
+      if (includesAny(normalizedText, doctor.keywords)) {
+        return doctor.name;
+      }
+    }
+    return null;
+  }
+
+  function dateToKey(date) {
+    return date.toISOString().slice(0, 10);
+  }
+
+  function dateToLabel(date) {
+    return date.toLocaleDateString("ru-RU", {
+      weekday: "short",
+      day: "2-digit",
+      month: "2-digit",
+    });
+  }
+
+  function toMinutesFromTime(timeObj) {
+    return timeObj.hour * 60 + timeObj.minute;
+  }
+
+  function normalizeSlotDoctor(rawDoctor, rawProcedure) {
+    const doctor = rawDoctor || rawProcedure || "Неизвестный специалист";
+    const normalized = normalizeText(doctor);
+    const found = parseDoctorFromText(normalized);
+    return found || doctor;
+  }
+
+  function getSlotStatusFromNode(node) {
+    const text = normalizeText(node.textContent || "");
+    const aria = normalizeText(node.getAttribute("aria-label") || "");
+    const klass = normalizeText(node.className || "");
+    const joined = `${text} ${aria} ${klass}`;
+
+    if (includesAny(joined, DOM_CONFIG.schedule.busyWords)) {
+      return "busy";
+    }
+
+    if (includesAny(joined, DOM_CONFIG.schedule.freeWords)) {
+      return "free";
+    }
+
+    if (includesAny(klass, DOM_CONFIG.schedule.busyClassHints)) {
+      return "busy";
+    }
+
+    if (includesAny(klass, DOM_CONFIG.schedule.freeClassHints)) {
+      return "free";
+    }
+
+    return "unknown";
+  }
+
+  function extractSlotFromNode(node, indexHint) {
+    const normalized = getRichNodeText(node);
+    const date = parseDateFromAttributes(node) || findDateNearNode(node) || parseDateFromText(normalized);
+    const time = parseTimeFromAttributes(node) || findTimeNearNode(node) || parseTimeFromText(normalized);
+    const doctorFromNode = queryAllBySelectors(DOM_CONFIG.schedule.doctorSelectors, node)
+      .map((el) => normalizeText(el.textContent || ""))
+      .filter(Boolean)
+      .join(" ");
+    const doctor = parseDoctorFromText(`${doctorFromNode} ${normalized}`);
+    const status = getSlotStatusFromNode(node);
+
+    if (!date || !time) {
+      return null;
+    }
+
+    const startMin = toMinutesFromTime(time);
+    const duration = 30;
+    const endMin = startMin + duration;
+    const dateKey = dateToKey(date);
+    const slotId = `slot-${dateKey}-${startMin}-${indexHint}`;
+
+    return {
+      id: slotId,
+      date,
+      dateKey,
+      dateLabel: dateToLabel(date),
+      startMin,
+      duration,
+      slotLabel: `${minutesToClock(startMin)} - ${minutesToClock(endMin)}`,
+      specialist: normalizeSlotDoctor(doctor, null),
+      procedure: "Прием",
+      status,
+      domId: slotId,
+    };
+  }
+
+  function extractSlotsFromPageDom() {
+    domSlotElements.clear();
+
+    const candidates = queryAllBySelectors(DOM_CONFIG.schedule.slotSelectors);
+
+    const result = [];
+
+    candidates.forEach((node, index) => {
+      if (!isVisibleNode(node)) {
+        return;
+      }
+
+      const text = getRichNodeText(node);
+      if (text.length < 6) {
+        return;
+      }
+
+      if (!parseTimeFromText(text)) {
+        return;
+      }
+
+      const slot = extractSlotFromNode(node, index);
+      if (!slot) {
+        return;
+      }
+
+      result.push(slot);
+      domSlotElements.set(slot.domId, node);
+    });
+
+    const unique = [];
+    const seen = new Set();
+    result.forEach((slot) => {
+      const key = `${slot.dateKey}-${slot.startMin}-${normalizeText(slot.specialist)}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      unique.push(slot);
+    });
+
+    return unique;
+  }
+
+  function toNodeStats() {
+    const cards = locatePatientCards();
+    const slots = extractSlotsFromPageDom();
+    const free = slots.filter((slot) => slot.status === "free").length;
+    const busy = slots.filter((slot) => slot.status === "busy").length;
+
+    return {
+      patientCards: cards.length,
+      totalSlots: slots.length,
+      freeSlots: free,
+      busySlots: busy,
+    };
+  }
+
+  function ensureRuntimeSlots() {
+    const fromDom = extractSlotsFromPageDom();
+    if (fromDom.length) {
+      state.runtimeSlots = fromDom;
+      queuePersist();
+      return;
+    }
+
+    if (state.scheduleGrid.length) {
+      state.runtimeSlots = state.scheduleGrid.map((item, idx) => {
+        const parts = item.slotLabel.match(/(\d{2}):(\d{2})/);
+        const startMin = parts ? Number(parts[1]) * 60 + Number(parts[2]) : 9 * 60 + idx * 30;
+        return {
+          id: `fallback-${item.dateKey || idx}-${startMin}`,
+          date: item.dateKey ? new Date(`${item.dateKey}T00:00:00`) : new Date(),
+          dateKey: item.dateKey || new Date().toISOString().slice(0, 10),
+          dateLabel: item.dateLabel || dateToLabel(new Date()),
+          startMin,
+          duration: item.duration || 30,
+          slotLabel: item.slotLabel || `${minutesToClock(startMin)} - ${minutesToClock(startMin + (item.duration || 30))}`,
+          specialist: item.specialist || "Специалист",
+          procedure: item.procedure || "Прием",
+          status: item.status === "ok" ? "free" : "busy",
+          domId: "",
+        };
+      });
+    }
+  }
+
+  function summarizeAvailability() {
+    ensureRuntimeSlots();
+    if (!state.runtimeSlots.length) {
+      return {
+        hasData: false,
+        freeCount: 0,
+        busyCount: 0,
+      };
+    }
+
+    let freeCount = 0;
+    let busyCount = 0;
+
+    state.runtimeSlots.forEach((slot) => {
+      if (slot.status === "free") {
+        freeCount += 1;
+      } else if (slot.status === "busy") {
+        busyCount += 1;
+      }
+    });
+
+    return {
+      hasData: true,
+      freeCount,
+      busyCount,
+    };
+  }
+
+  function parseRequestedSlot(normalizedText) {
+    const directDate = parseDateFromText(normalizedText);
+    const relativeDate = parseRelativeDateFromText(normalizedText);
+    const date = directDate || relativeDate;
+
+    const directTime = parseTimeFromText(normalizedText);
+    const time = inferTimeWithContext(directTime, normalizedText);
+    const specialist = parseDoctorFromText(normalizedText);
+
+    if (!date || !time) {
+      return null;
+    }
+
+    return {
+      date,
+      dateKey: dateToKey(date),
+      dateLabel: dateToLabel(date),
+      startMin: toMinutesFromTime(time),
+      specialist,
+    };
+  }
+
+  function mergeSlotRequest(baseRequest, extraRequest) {
+    if (!baseRequest && !extraRequest) {
+      return null;
+    }
+    if (!baseRequest) {
+      return extraRequest;
+    }
+    if (!extraRequest) {
+      return baseRequest;
+    }
+
+    const date = extraRequest.date || baseRequest.date;
+    const dateKey = extraRequest.dateKey || baseRequest.dateKey;
+    const dateLabel = extraRequest.dateLabel || baseRequest.dateLabel;
+    const startMin =
+      typeof extraRequest.startMin === "number" ? extraRequest.startMin : baseRequest.startMin;
+    const specialist = extraRequest.specialist || baseRequest.specialist;
+
+    if (!date || typeof startMin !== "number") {
+      return null;
+    }
+
+    return {
+      date,
+      dateKey,
+      dateLabel,
+      startMin,
+      specialist,
+    };
+  }
+
+  function getClosestCandidateSlot(request) {
+    ensureRuntimeSlots();
+    if (!state.runtimeSlots.length) {
+      return null;
+    }
+
+    const wantedSpecialist = request.specialist ? normalizeText(request.specialist) : "";
+
+    let candidates = state.runtimeSlots.filter((slot) => {
+      if (slot.dateKey !== request.dateKey) {
+        return false;
+      }
+      if (wantedSpecialist) {
+        return normalizeText(slot.specialist) === wantedSpecialist;
+      }
+      return true;
+    });
+
+    if (!candidates.length) {
+      candidates = state.runtimeSlots.filter((slot) => slot.dateKey === request.dateKey);
+    }
+
+    if (!candidates.length) {
+      return null;
+    }
+
+    return candidates.reduce((best, current) => {
+      if (!best) {
+        return current;
+      }
+      const bestDiff = Math.abs(best.startMin - request.startMin);
+      const currentDiff = Math.abs(current.startMin - request.startMin);
+      return currentDiff < bestDiff ? current : best;
+    }, null);
+  }
+
+  function findAlternativeFreeSlot(baseSlot) {
+    ensureRuntimeSlots();
+    const specialistNorm = normalizeText(baseSlot.specialist || "");
+    const sameDoctor = state.runtimeSlots.filter(
+      (slot) => normalizeText(slot.specialist) === specialistNorm && slot.status === "free"
+    );
+
+    if (sameDoctor.length) {
+      return sameDoctor[0];
+    }
+
+    return state.runtimeSlots.find((slot) => slot.status === "free") || null;
+  }
+
+  async function placeSlotToDom(slot) {
+    if (!slot.domId) {
+      return false;
+    }
+
+    const node = domSlotElements.get(slot.domId);
+    if (!node) {
+      return false;
+    }
+
+    const clicked = clickElementSafe(node);
+    if (!clicked) {
+      return false;
+    }
+
+    const confirmButton =
+      findVisibleNodeByText(DOM_CONFIG.schedule.confirmSelectors, DOM_CONFIG.schedule.confirmKeywords) ||
+      findVisibleNodeByText(DOM_CONFIG.interactiveSelectors, DOM_CONFIG.schedule.confirmKeywords);
+
+    if (confirmButton) {
+      clickElementSafe(confirmButton);
+    }
+
+    const nodeClass = String(node.className || "");
+    node.className = `${nodeClass} jarvis-slot-success`;
+    node.setAttribute("data-jarvis-booked", "true");
+
+    const statusBadge =
+      node.querySelector(".schedule-status") ||
+      node.querySelector("[data-testid*='status']") ||
+      node.querySelector("[aria-label*='свобод']");
+    if (statusBadge) {
+      statusBadge.textContent = "Занято";
+      statusBadge.className = `${statusBadge.className || ""} busy booked reserved jarvis-slot-success`;
+      statusBadge.setAttribute("aria-label", "занято booked");
+    }
+
+    return true;
+  }
+
+  function findFieldBySelectors(selectors) {
+    const nodes = queryAllBySelectors(selectors);
+    return (
+      nodes.find((node) => {
+        if (!isVisibleNode(node)) {
+          return false;
+        }
+        return node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement;
+      }) || null
+    );
+  }
+
+  function findFieldBySemanticHints(hints) {
+    const needles = (Array.isArray(hints) ? hints : [])
+      .map((item) => normalizeText(item))
+      .filter(Boolean);
+    if (!needles.length) {
+      return null;
+    }
+
+    const allInputs = [
+      ...queryAllBySelectors("textarea"),
+      ...queryAllBySelectors("input[type='text']"),
+      ...queryAllBySelectors("[contenteditable='true']"),
+    ].filter((node) => isVisibleNode(node));
+
+    for (const input of allInputs) {
+      if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement || input.isContentEditable)) {
+        continue;
+      }
+
+      const context = fieldContextText(input);
+      if (needles.some((needle) => context.includes(needle))) {
+        return input;
+      }
+    }
+
+    return null;
+  }
+
+  function valueMatchesExpected(actual, expected) {
+    const a = normalizeText(String(actual || ""));
+    const e = normalizeText(String(expected || ""));
+    if (!e) {
+      return a.length === 0;
+    }
+
+    if (a === e) {
+      return true;
+    }
+
+    if (a.includes(e) || e.includes(a)) {
+      return true;
+    }
+
+    const minLength = Math.max(10, Math.floor(e.length * 0.45));
+    return a.length >= minLength;
+  }
+
+  function verifyVisitDraftInDom(entries) {
+    const checks = entries.map((entry) => {
+      const field = findFieldBySelectors(entry.selectors);
+      const actual = field ? String(field.value || "") : "";
+      const expected = String(entry.value || "");
+
+      return {
+        key: entry.key,
+        ok: Boolean(field) && valueMatchesExpected(actual, expected),
+      };
+    });
+
+    const okCount = checks.filter((item) => item.ok).length;
+    const missing = checks.filter((item) => !item.ok).map((item) => item.key);
+
+    return {
+      okCount,
+      total: checks.length,
+      missing,
+    };
+  }
+
+  function summarizeVisitVerification(check) {
+    if (!check || check.total === 0) {
+      return "Поля осмотра не найдены в DOM.";
+    }
+
+    if (check.okCount === check.total) {
+      return `Проверка полей успешна: ${check.okCount} из ${check.total} разделов записаны.`;
+    }
+
+    const missingNames = check.missing
+      .map((key) => VISIT_FIELD_TITLES[key] || key)
+      .join(", ");
+
+    return `Частичная запись: ${check.okCount} из ${check.total}. Нужна ручная проверка: ${missingNames}.`;
+  }
+
+  function strictVisitVerified(check) {
+    if (!check) {
+      return false;
+    }
+    return check.total > 0 && check.okCount === check.total;
+  }
+
+  function hasStrictVisitLock() {
+    return Boolean(state.strictVisitPending && state.visitDraft);
+  }
+
+  function deriveSlotStatusFromNode(node) {
+    if (!node) {
+      return "unknown";
+    }
+
+    const rowText = getRichNodeText(node);
+    if (includesAny(rowText, DOM_CONFIG.schedule.busyWords)) {
+      return "busy";
+    }
+    if (includesAny(rowText, DOM_CONFIG.schedule.freeWords)) {
+      return "free";
+    }
+
+    const statusBadge =
+      node.querySelector(".schedule-status") ||
+      node.querySelector("[data-testid*='status']") ||
+      node.querySelector("[aria-label*='занято']") ||
+      node.querySelector("[aria-label*='свобод']");
+
+    if (!statusBadge) {
+      return "unknown";
+    }
+
+    const statusText = getRichNodeText(statusBadge);
+    if (includesAny(statusText, DOM_CONFIG.schedule.busyWords)) {
+      return "busy";
+    }
+    if (includesAny(statusText, DOM_CONFIG.schedule.freeWords)) {
+      return "free";
+    }
+
+    return "unknown";
+  }
+
+  async function verifySlotBookingInDom(slot) {
+    if (!slot) {
+      return { ok: false, status: "unknown" };
+    }
+
+    await wait(260);
+
+    const node = slot.domId ? domSlotElements.get(slot.domId) : null;
+    const status = deriveSlotStatusFromNode(node);
+    const bookedAttr = node ? node.getAttribute("data-jarvis-booked") === "true" : false;
+
+    return {
+      ok: status === "busy" || bookedAttr,
+      status,
+      bookedAttr,
+    };
+  }
+
+  async function injectVisitDraftToDom(draft) {
+    if (!draft) {
+      return { success: false, filled: 0, verification: null };
+    }
+
+    const entries = [
+      { key: "complaints", value: draft.complaints, selectors: DOM_CONFIG.visit.fieldSelectors.complaints },
+      { key: "anamnesis", value: draft.anamnesis, selectors: DOM_CONFIG.visit.fieldSelectors.anamnesis },
+      { key: "objective", value: draft.objective, selectors: DOM_CONFIG.visit.fieldSelectors.objective },
+      { key: "diagnosis", value: draft.diagnosis, selectors: DOM_CONFIG.visit.fieldSelectors.diagnosis },
+      { key: "treatment", value: draft.treatment, selectors: DOM_CONFIG.visit.fieldSelectors.treatment },
+      { key: "diary", value: draft.diary, selectors: DOM_CONFIG.visit.fieldSelectors.diary },
+    ];
+
+    let filled = 0;
+
+    entries.forEach((entry) => {
+      const input = findFieldBySelectors(entry.selectors) || findFieldBySemanticHints([
+        entry.key,
+        VISIT_FIELD_TITLES[entry.key] || entry.key,
+      ]);
+      if (!input) {
+        return;
+      }
+
+      const fieldValue = entry.value || "";
+      if (input.isContentEditable) {
+        input.focus();
+        input.textContent = fieldValue;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        applyInputValue(input, fieldValue);
+      }
+      input.setAttribute("data-jarvis-filled", entry.key);
+      filled += 1;
+    });
+
+    await wait(130);
+    const verification = verifyVisitDraftInDom(entries);
+
+    const saveButton =
+      findVisibleNodeByText(DOM_CONFIG.visit.saveSelectors, DOM_CONFIG.visit.saveKeywords) ||
+      findVisibleNodeByText(DOM_CONFIG.interactiveSelectors, DOM_CONFIG.visit.saveKeywords);
+
+    if (saveButton) {
+      clickElementSafe(saveButton);
+    }
+
+    const host = document.body || document.documentElement;
+    if (host) {
+      const note = document.createElement("div");
+      note.id = "jarvis-visit-success-note";
+      note.style.position = "fixed";
+      note.style.left = "16px";
+      note.style.bottom = "16px";
+      note.style.zIndex = "2147483647";
+      note.style.background = "#0f7a26";
+      note.style.color = "#fff";
+      note.style.padding = "10px 14px";
+      note.style.borderRadius = "12px";
+      note.style.fontFamily = "Nunito Sans, sans-serif";
+      note.style.fontSize = "12px";
+      note.style.fontWeight = "700";
+      note.style.boxShadow = "0 14px 28px rgba(7, 58, 21, 0.28)";
+      note.textContent = "JARVIS: поля осмотра заполнены и сохранены";
+
+      const prev = document.getElementById("jarvis-visit-success-note");
+      if (prev) {
+        prev.remove();
+      }
+
+      host.appendChild(note);
+      window.setTimeout(() => {
+        note.remove();
+      }, 2600);
+    }
+
+    return {
+      success: filled > 0,
+      filled,
+      verification,
+    };
+  }
+
+  async function tryOpenPatientVisitByDom(patientHint) {
+    const normalizedHint = normalizeText(patientHint || "");
+
+    const search = findPatientSearchInput();
+    if (search && normalizedHint) {
+      search.focus();
+      applyInputValue(search, patientHint);
+      await wait(600);
+    }
+
+    let openedPatient = false;
+    if (normalizedHint) {
+      const patientCard = findPatientCardByHint(normalizedHint);
+      if (patientCard) {
+        const actionInsideCard = findActionButtonInside(
+          patientCard,
+          DOM_CONFIG.patient.openButtonsSelectors,
+          DOM_CONFIG.patient.openButtonsKeywords
+        );
+        if (actionInsideCard) {
+          openedPatient = clickElementSafe(actionInsideCard);
+        }
+
+        if (!openedPatient) {
+          openedPatient = clickElementSafe(patientCard);
+        }
+
+        if (openedPatient) {
+          await wait(450);
+        }
+      }
+    }
+
+    const visitOpened = openAcceptOrStartVisitButton();
+    return visitOpened || openedPatient;
+  }
+
+  async function runLocalAiProcessing(visitLines, patientHint) {
+    const endpoint = state.config.localAiUrl;
+    if (!endpoint) {
+      return null;
+    }
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          patient_hint: patientHint,
+          transcript_lines: visitLines,
+        }),
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const data = await response.json();
+      if (!data || typeof data !== "object") {
+        return null;
+      }
+
+      const mapped = {
+        patient: String(data.patient || patientHint || "").trim(),
+        complaints: String(data.complaints || data.jaloby || "").trim(),
+        anamnesis: String(data.anamnesis || data.history || "").trim(),
+        objective: String(data.objective || data.exam || "").trim(),
+        diagnosis: String(data.diagnosis || data.dx || "").trim(),
+        treatment: String(data.treatment || data.plan || "").trim(),
+        diary: String(data.diary || data.notes || "").trim(),
+        createdAt: new Date().toISOString(),
+      };
+
+      return mapped;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function hasStructuredVisitDraft(draft) {
+    if (!draft || typeof draft !== "object") {
+      return false;
+    }
+
+    const keys = ["complaints", "anamnesis", "objective", "diagnosis", "treatment", "diary"];
+    const filledCount = keys.reduce((acc, key) => {
+      return acc + (String(draft[key] || "").trim().length > 0 ? 1 : 0);
+    }, 0);
+
+    return filledCount >= 4;
+  }
+
+  async function askVisitDraftConfirmation(draft, source) {
+    if (!draft) {
+      return;
+    }
+
+    state.awaitingVoiceConfirm = {
+      kind: "visit_draft",
+      source,
+      createdAt: Date.now(),
+    };
+    queuePersist();
+
+    const sourceTitle = source === "local_ai" ? "локальной ИИ" : "правилам";
+    await speakAndPublish("fill_form", `Черновик сформирован по ${sourceTitle}. Все подтверждаете для внесения?`, {
+      draft,
+      source,
+    }, { resume: true });
+  }
+
+  async function beginVisit(rawCommand) {
+    if (state.stage !== STAGE.COMMAND) {
+      await speakAndPublish("start_recording", "Сначала откройте сайт командой: Джарвиз открой дамумед или Джарвиз открой песочницу", {
+        requiredStatus: "READY",
+      }, {
+        resume: state.listening,
+      });
+      return;
+    }
+
+    const analysis = analyzeCurrentPage();
+    if (analysis.site !== "other" && analysis.loginRequired) {
+      state.stage = STAGE.AWAITING_LOGIN;
+      queuePersist();
+      renderAll();
+      startLoginWatcher();
+      await speakAndPublish("open_site", "Требуется вход в систему", {
+        site: analysis.site,
+        loginRequired: true,
+      }, {
+        resume: state.listening,
+      });
+      return;
+    }
+
+    const openedByDom = await tryOpenPatientVisitByDom(extractPatientHint(rawCommand));
+
+    state.stage = STAGE.RECORDING_VISIT;
+    state.visitLines = [];
+    state.visitDraft = null;
+    state.scheduleGrid = [];
+    state.runtimeSlots = [];
+    state.pendingSuggestedSlot = null;
+    state.strictVisitPending = false;
+    state.patientHint = extractPatientHint(rawCommand);
+    queuePersist();
+    renderAll();
+
+    await speakAndPublish("start_recording", "Начинаю запись приема", {
+      openedByDom,
+      patientHint: state.patientHint,
+    }, { resume: true });
+  }
+
+  function appendVisitLine(text) {
+    state.visitLines.push(String(text || "").trim());
+    state.visitLines = trimArray(state.visitLines, 500);
+    queuePersist();
+  }
+
+  function buildVisitDraft(lines, patientHint) {
+    const sections = {
+      complaints: [],
+      anamnesis: [],
+      objective: [],
+      diagnosis: [],
+      treatment: [],
+      diary: [],
+    };
+
+    let activeSection = "complaints";
+
+    lines.forEach((line) => {
+      const normalized = normalizeText(line);
+
+      if (includesAny(normalized, ["жалоб", "жалоба"])) {
+        activeSection = "complaints";
+      } else if (includesAny(normalized, ["анамнез", "история", "болеет", "со слов"])) {
+        activeSection = "anamnesis";
+      } else if (includesAny(normalized, ["объектив", "обьектив", "осмотр", "температур", "давлен"])) {
+        activeSection = "objective";
+      } else if (includesAny(normalized, ["диагноз", "мкб", "код"])) {
+        activeSection = "diagnosis";
+      } else if (includesAny(normalized, ["назнач", "рекоменд", "лечение", "препарат", "терапи"])) {
+        activeSection = "treatment";
+      } else if (includesAny(normalized, ["дневник", "динамик", "состояние сегодня"])) {
+        activeSection = "diary";
+      }
+
+      sections[activeSection].push(line.trim());
+    });
+
+    const fallback = "";
+    const join = (array) => (array.length ? array.join(" ") : fallback);
+
+    return {
+      patient: patientHint || "Не указан",
+      complaints: join(sections.complaints),
+      anamnesis: join(sections.anamnesis),
+      objective: join(sections.objective),
+      diagnosis: join(sections.diagnosis),
+      treatment: join(sections.treatment),
+      diary: join(sections.diary),
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  function overlaps(startA, durationA, startB, durationB) {
+    const endA = startA + durationA;
+    const endB = startB + durationB;
+    return startA < endB && startB < endA;
+  }
+
+  function minutesToClock(total) {
+    const mm = total % 60;
+    const hh = Math.floor(total / 60);
+    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  }
+
+  function nextWorkingDays(count) {
+    const days = [];
+    const cursor = new Date();
+
+    while (days.length < count) {
+      cursor.setDate(cursor.getDate() + 1);
+      const day = cursor.getDay();
+      if (day === 0 || day === 6) {
+        continue;
+      }
+
+      days.push({
+        key: cursor.toISOString().slice(0, 10),
+        dateLabel: cursor.toLocaleDateString("ru-RU", {
+          weekday: "short",
+          day: "2-digit",
+          month: "2-digit",
+        }),
+      });
+    }
+
+    return days;
+  }
+
+  function buildBusyGrid(days) {
+    const specialists = ["Инструктор ЛФК", "Массажист", "Клинический психолог"];
+    const grid = {};
+
+    days.forEach((day, dayIndex) => {
+      grid[day.key] = {};
+
+      specialists.forEach((specialist, specialistIndex) => {
+        const firstStart = 9 * 60 + ((dayIndex + specialistIndex * 2) % 7) * 30;
+        const secondStart = 13 * 60 + ((dayIndex * 2 + specialistIndex) % 8) * 20;
+
+        const firstDuration = specialist === "Клинический психолог" ? 30 : 40;
+        const secondDuration = specialist === "Инструктор ЛФК" ? 40 : 30;
+
+        grid[day.key][specialist] = [
+          { start: firstStart, duration: firstDuration },
+          { start: secondStart, duration: secondDuration },
+        ];
+      });
+    });
+
+    return grid;
+  }
+
+  function findFreeStart(busyIntervals, duration) {
+    const dayStart = 9 * 60;
+    const dayEnd = 18 * 60;
+
+    for (let start = dayStart; start + duration <= dayEnd; start += 10) {
+      const blocked = busyIntervals.some((interval) =>
+        overlaps(start, duration, interval.start, interval.duration)
+      );
+      if (!blocked) {
+        return start;
+      }
+    }
+
+    return null;
+  }
+
+  function generateSmartSchedule() {
+    const basePlan = [
+      { procedure: "ЛФК", specialist: "Инструктор ЛФК", duration: 40 },
+      { procedure: "Массаж", specialist: "Массажист", duration: 40 },
+      { procedure: "Психолог", specialist: "Клинический психолог", duration: 30 },
+    ];
+
+    const days = nextWorkingDays(9);
+    const busyGrid = buildBusyGrid(days);
+
+    return days.map((day, index) => {
+      const plan = basePlan[index % basePlan.length];
+      const busy = busyGrid[day.key][plan.specialist];
+      const start = findFreeStart(busy, plan.duration);
+
+      if (start === null) {
+        return {
+          dateKey: day.key,
+          dateLabel: day.dateLabel,
+          procedure: plan.procedure,
+          specialist: plan.specialist,
+          duration: plan.duration,
+          slotLabel: "Нет свободного окна",
+          status: "wait",
+        };
+      }
+
+      busy.push({
+        start,
+        duration: plan.duration,
+      });
+
+      return {
+        dateKey: day.key,
+        dateLabel: day.dateLabel,
+        procedure: plan.procedure,
+        specialist: plan.specialist,
+        duration: plan.duration,
+        slotLabel: `${minutesToClock(start)} - ${minutesToClock(start + plan.duration)}`,
+        status: "ok",
+      };
+    });
+  }
+
+  async function fetchAndApplySandboxSchedule(draft) {
+    const sandboxUrl = state.config.sandboxUrl || DEFAULTS.sandboxUrl;
+    const sandboxApiBase = toApiBaseUrl(sandboxUrl) || toApiBaseUrl(DEFAULTS.sandboxUrl);
+    if (!sandboxApiBase) {
+      return null;
+    }
+    const plan = [];
+    const lfkCount = Number(draft && draft.lfk) || 9;
+    const massageCount = Number(draft && draft.massage) || 5;
+    const psyCount = Number(draft && draft.psychologist) || 3;
+    if (lfkCount > 0) plan.push({ type: "lfk", duration: 30, count: lfkCount });
+    if (massageCount > 0) plan.push({ type: "massage", duration: 30, count: massageCount });
+    if (psyCount > 0) plan.push({ type: "psychologist", duration: 40, count: psyCount });
+
+    // Ensure a patient is selected in sandbox before generating schedule
+    const patientQuery = (draft && draft.patient) || state.patientHint || "первого";
+    try {
+      await fetch(`${sandboxApiBase}/api/reception/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: patientQuery }),
+      });
+    } catch (_e) {
+      // Proceed anyway — sandbox may already have a patient open
+    }
+
+    try {
+      const resp = await fetch(`${sandboxApiBase}/api/schedule/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan, startDate: new Date().toISOString().slice(0, 10) }),
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+      state.runtimeSlots = assignments.map((asg, idx) => {
+        const tp = asg.startTime ? asg.startTime.match(/(\d{1,2}):(\d{2})/) : null;
+        const startMin = tp ? Number(tp[1]) * 60 + Number(tp[2]) : 9 * 60 + idx * 30;
+        const ep = asg.endTime ? asg.endTime.match(/(\d{1,2}):(\d{2})/) : null;
+        const endMin = ep ? Number(ep[1]) * 60 + Number(ep[2]) : startMin + 30;
+        const dateKey = asg.date || new Date().toISOString().slice(0, 10);
+        const dateObj = new Date(`${dateKey}T00:00:00`);
+        return {
+          id: asg.id || `api-${idx}`,
+          date: dateObj,
+          dateKey,
+          dateLabel: dateToLabel(dateObj),
+          startMin,
+          duration: asg.duration || 30,
+          slotLabel: `${asg.startTime || minutesToClock(startMin)} - ${asg.endTime || minutesToClock(endMin)}`,
+          specialist: asg.specialist || "Специалист",
+          procedure: asg.type || "Прием",
+          status: "busy",
+          domId: "",
+        };
+      });
+      state.scheduleGrid = [];
+      queuePersist();
+      // Navigate to schedule tab in sandbox DOM
+      document.querySelectorAll(".nav-btn").forEach((btn) => {
+        if (btn.dataset && btn.dataset.screen === "schedule") btn.click();
+      });
+      return data;
+    } catch (_err) {
+      console.error("[JARVIS] fetchAndApplySandboxSchedule error:", _err);
+      return null;
+    }
+  }
+
+  async function checkSlotAvailabilityApi(dateKey, timeStr) {
+    const sandboxUrl = state.config.sandboxUrl || DEFAULTS.sandboxUrl;
+    const sandboxApiBase = toApiBaseUrl(sandboxUrl) || toApiBaseUrl(DEFAULTS.sandboxUrl);
+    if (!sandboxApiBase) {
+      return null;
+    }
+    try {
+      const resp = await fetch(
+        `${sandboxApiBase}/api/slots/check?date=${encodeURIComponent(dateKey)}&time=${encodeURIComponent(timeStr)}`
+      );
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch {
+      return null;
+    }
+  }
+
+  async function announceCurrentAvailability() {
+    ensureRuntimeSlots();
+    renderAll();
+
+    const total = state.runtimeSlots.length + state.scheduleGrid.length;
+
+    if (!total) {
+      await speakAndPublish("check_schedule", "Расписание не найдено. Сформируйте расписание вручную.", {
+        hasData: false,
+      }, { resume: true });
+      return;
+    }
+
+    state.stage = STAGE.AWAITING_SLOT_SELECTION;
+    queuePersist();
+    renderAll();
+
+    const busyCount = state.runtimeSlots.filter((s) => s.status === "busy").length;
+    const freeCount = state.runtimeSlots.filter((s) => s.status === "free").length;
+
+    if (freeCount === 0 && busyCount > 0) {
+      // All slots are pre-assigned (API schedule) — announce count and invite queries
+      await speakAndPublish("check_schedule",
+        `Расписание сформировано: ${busyCount} назначений. Назовите день и время — проверю доступность.`,
+        { totalSlots: busyCount, fromApi: true },
+        { resume: true }
+      );
+    } else {
+      await speakAndPublish("check_schedule",
+        `Проверил расписание: свободно ${freeCount}, занято ${busyCount}. Назовите команду: Поставь на день и время`,
+        { freeCount, busyCount },
+        { resume: true }
+      );
+    }
+  }
+
+  async function applyRequestedSlot(normalized) {
+    if (state.stage !== STAGE.AWAITING_SLOT_SELECTION) {
+      await speakAndPublish("check_schedule", "Сначала завершите этап формирования расписания", {
+        requiredStatus: "SCHEDULING",
+      }, {
+        resume: true,
+      });
+      return;
+    }
+
+    if (isYesCommand(normalized) && state.pendingSuggestedSlot) {
+      const placedSuggested = await placeSlotToDom(state.pendingSuggestedSlot);
+      if (placedSuggested) {
+        state.pendingSuggestedSlot.status = "busy";
+        const verifySuggested = await verifySlotBookingInDom(state.pendingSuggestedSlot);
+        state.stage = STAGE.IDLE;
+        state.pendingSuggestedSlot = null;
+        queuePersist();
+        renderAll();
+        if (verifySuggested.ok) {
+          await speakAndPublish("check_schedule", "Запись успешно создана", {
+            verification: verifySuggested,
+          }, {
+            resume: true,
+          });
+        } else {
+          await speakAndPublish("check_schedule", "Запрос на запись отправлен, но подтверждение по DOM не получено", {
+            verification: verifySuggested,
+          }, {
+            resume: true,
+          });
+        }
+      } else {
+        await speakAndPublish("check_schedule", "Не удалось автоматически поставить слот. Проверьте расписание вручную", {}, {
+          resume: true,
+        });
+      }
+      return;
+    }
+
+    if (isNoCommand(normalized) && state.pendingSuggestedSlot) {
+      state.pendingSuggestedSlot = null;
+      queuePersist();
+      renderAll();
+      await speakAndPublish("check_schedule", "Это время занято. Назовите другое", {}, { resume: true });
+      return;
+    }
+
+    const parsedRequest = parseRequestedSlot(normalized);
+    const nowTs = Date.now();
+    let previousRequest = state.pendingSlotRequest;
+
+    if (previousRequest && nowTs - (Number(previousRequest.ts) || 0) > SLOT_REQUEST_TTL_MS) {
+      previousRequest = null;
+      state.pendingSlotRequest = null;
+    }
+
+    const request = mergeSlotRequest(previousRequest ? previousRequest.request : null, parsedRequest);
+    if (!request) {
+      await speakAndPublish("check_schedule", "Не распознал дату и время. Скажите: Поставь на день и время", {}, {
+        resume: true,
+      });
+      return;
+    }
+
+    state.pendingSlotRequest = {
+      request,
+      ts: nowTs,
+      source: normalized,
+    };
+    queuePersist();
+
+    const hh = String(Math.floor(request.startMin / 60)).padStart(2, "0");
+    const mm = String(request.startMin % 60).padStart(2, "0");
+    const timeStr = `${hh}:${mm}`;
+
+    // Check via sandbox API first
+    const apiCheck = await checkSlotAvailabilityApi(request.dateKey, timeStr);
+
+    if (apiCheck !== null) {
+      if (!apiCheck.available) {
+        if (apiCheck.reason === "busy_other_patient") {
+          await speakAndPublish("check_schedule",
+            `Время ${timeStr} ${request.dateLabel} занято другим пациентом. Выберите другое время.`,
+            { dateKey: request.dateKey, time: timeStr },
+            { resume: true }
+          );
+        } else if (apiCheck.reason === "already_assigned" && apiCheck.assignment) {
+          const asg = apiCheck.assignment;
+          await speakAndPublish("check_schedule",
+            `В это время уже назначен ${asg.specialist}. Расписание сформировано автоматически.`,
+            { assignment: asg },
+            { resume: true }
+          );
+        } else {
+          await speakAndPublish("check_schedule",
+            `Время ${timeStr} ${request.dateLabel} занято. Назовите другое.`,
+            { dateKey: request.dateKey, time: timeStr },
+            { resume: true }
+          );
+        }
+        return;
+      }
+
+      // Slot is free
+      state.pendingSlotRequest = null;
+      queuePersist();
+      await speakAndPublish("check_schedule",
+        `Время ${timeStr} ${request.dateLabel} свободно. Расписание уже сформировано автоматически, проверьте вкладку Назначения.`,
+        { dateKey: request.dateKey, time: timeStr, available: true },
+        { resume: true }
+      );
+      return;
+    }
+
+    // API unavailable — fallback to local runtimeSlots
+    const candidate = getClosestCandidateSlot(request);
+    if (!candidate) {
+      await speakAndPublish("check_schedule", "Это время занято. Назовите другое", {
+        dateKey: request.dateKey,
+      }, {
+        resume: true,
+      });
+      return;
+    }
+
+    if (candidate.status === "busy") {
+      await speakAndPublish("check_schedule", "Это время занято. Назовите другое", {}, { resume: true });
+      return;
+    }
+
+    const placed = await placeSlotToDom(candidate);
+    if (placed) {
+      candidate.status = "busy";
+      const verifyPrimary = await verifySlotBookingInDom(candidate);
+      state.stage = STAGE.IDLE;
+      state.pendingSuggestedSlot = null;
+      state.pendingSlotRequest = null;
+      queuePersist();
+      renderAll();
+      await speakAndPublish("check_schedule",
+        verifyPrimary.ok ? "Запись успешно создана" : "Запись отправлена, проверьте расписание",
+        { slot: { dateLabel: candidate.dateLabel, slotLabel: candidate.slotLabel, specialist: candidate.specialist } },
+        { resume: true }
+      );
+      return;
+    }
+
+    await speakAndPublish("check_schedule", `Время ${timeStr} свободно. Проверьте расписание на сайте.`, {}, { resume: true });
+  }
+
+  async function finishVisit() {
+    if (state.stage !== STAGE.RECORDING_VISIT) {
+      await speakAndPublish("start_recording", "Прием еще не открыт. Скажите: Джарвиз начни прием", {
+        requiredStatus: "READY",
+      }, {
+        resume: state.listening,
+      });
+      return;
+    }
+
+    state.stage = STAGE.PROCESSING_VISIT;
+    queuePersist();
+    renderAll();
+
+    await speakAndPublish("stop_recording", "Обрабатываю данные приема", {
+      transcriptLines: state.visitLines.length,
+    }, { resume: false });
+
+    const aiDraft = await runLocalAiProcessing(state.visitLines, state.patientHint);
+    const fallbackDraft = buildVisitDraft(state.visitLines, state.patientHint);
+    const draft = aiDraft || fallbackDraft;
+    state.visitDraft = draft;
+    state.stage = STAGE.AWAITING_VISIT_CONFIRMATION;
+    queuePersist();
+    renderAll();
+
+    if (aiDraft && hasStructuredVisitDraft(aiDraft)) {
+      await askVisitDraftConfirmation(draft, "local_ai");
+      return;
+    }
+
+    await askVisitDraftConfirmation(draft, "rule_fallback");
+  }
+
+  async function confirmVisitAndAdvance(verification) {
+    state.strictVisitPending = false;
+    state.stage = STAGE.AWAITING_SLOT_SELECTION;
+    queuePersist();
+    renderAll();
+
+    await speakAndPublish("fill_form", "Данные внесены. Формирую расписание...", { verification }, { resume: false });
+
+    const scheduleData = await fetchAndApplySandboxSchedule(state.visitDraft);
+    if (!scheduleData) {
+      const fromDom = extractSlotsFromPageDom();
+      if (fromDom.length) {
+        state.runtimeSlots = fromDom;
+        state.scheduleGrid = [];
+      } else {
+        state.scheduleGrid = generateSmartSchedule();
+        state.runtimeSlots = [];
+      }
+      queuePersist();
+    }
+
+    renderAll();
+    await announceCurrentAvailability();
+  }
+
+  async function handleVisitConfirmation(normalized) {
+    if (state.awaitingVoiceConfirm && state.awaitingVoiceConfirm.kind === "visit_draft") {
+      if (isYesCommand(normalized)) {
+        state.awaitingVoiceConfirm = null;
+        queuePersist();
+      } else if (isNoCommand(normalized)) {
+        state.awaitingVoiceConfirm = null;
+        state.stage = STAGE.IDLE;
+        state.strictVisitPending = false;
+        queuePersist();
+        renderAll();
+        await speakAndPublish("fill_form", "Хорошо, черновик не вношу. Можете отредактировать вручную и нажать Внести в форму вручную.", {}, {
+          resume: true,
+        });
+        return;
+      }
+    }
+
+    if (isYesCommand(normalized)) {
+      const injectResult = await injectVisitDraftToDom(state.visitDraft);
+      const verification = injectResult.verification;
+
+      // If DOM fields not found on this page (total=0), accept confirmation —
+      // user will fill manually via popup "Внести в форму вручную"
+      if (!verification || verification.total === 0) {
+        console.log("[JARVIS confirm] no DOM fields found, accepting manually");
+        await confirmVisitAndAdvance({ total: 0, okCount: 0, skipped: true });
+        return;
+      }
+
+      if (injectResult.success && strictVisitVerified(verification)) {
+        await confirmVisitAndAdvance(verification);
+        return;
+      }
+
+      state.strictVisitPending = true;
+      state.stage = STAGE.AWAITING_VISIT_CONFIRMATION;
+      queuePersist();
+      renderAll();
+
+      await speakAndPublish("fill_form", "Не все поля заполнены. Скажите ещё раз: Да подтверждаю — или нажмите кнопку в расширении", {
+        verification,
+      }, { resume: true });
+      return;
+    }
+
+    if (isNoCommand(normalized)) {
+      state.stage = STAGE.IDLE;
+      state.strictVisitPending = false;
+      state.awaitingVoiceConfirm = null;
+      queuePersist();
+      renderAll();
+      await speakAndPublish("fill_form", "Вы можете проверить и внести вручную", {}, {
+        resume: true,
+      });
+      return;
+    }
+
+    await speakAndPublish("fill_form", "Не расслышал подтверждение. Скажите: Да подтверждаю или Нет", {}, {
+      resume: true,
+    });
+  }
+
+  async function handleScheduleConfirmation(normalized) {
+    if (isYesCommand(normalized)) {
+      state.stage = STAGE.AWAITING_SLOT_SELECTION;
+      queuePersist();
+      renderAll();
+
+      const scheduleData = await fetchAndApplySandboxSchedule(state.visitDraft);
+      if (!scheduleData) {
+        const fromDom = extractSlotsFromPageDom();
+        if (fromDom.length) {
+          state.runtimeSlots = fromDom;
+          state.scheduleGrid = [];
+        } else {
+          state.scheduleGrid = generateSmartSchedule();
+          state.runtimeSlots = [];
+        }
+        queuePersist();
+      }
+
+      await announceCurrentAvailability();
+      return;
+    }
+
+    if (isNoCommand(normalized)) {
+      state.stage = STAGE.IDLE;
+      queuePersist();
+      renderAll();
+      await speakAndPublish("check_schedule", "Вы можете проверить и внести вручную", {}, {
+        resume: true,
+      });
+      return;
+    }
+
+    await speakAndPublish("check_schedule", "Ответ не распознан. Скажите: Да или Нет", {}, {
+      resume: true,
+    });
+  }
+
+  async function resetVisitFlow() {
+    stopLoginWatcher();
+
+    state.stage = STAGE.IDLE;
+    state.visitLines = [];
+    state.visitDraft = null;
+    state.scheduleGrid = [];
+    state.runtimeSlots = [];
+    state.pendingSuggestedSlot = null;
+    state.pendingSlotRequest = null;
+    state.awaitingVoiceConfirm = null;
+    state.strictVisitPending = false;
+    state.patientHint = "";
+    state.pendingSiteCheck = null;
+    state.transcript = [];
+
+    queuePersist();
+    renderAll();
+
+    if (state.listening) {
+      await speakAndPublish("none", "Сценарий очищен. Ожидаю команду: Джарвиз открой дамумед или Джарвиз открой песочницу", {}, {
+        resume: true,
+      });
+    } else {
+      pageToast("Сценарий приема очищен.");
+    }
+  }
+
+  async function processVoiceText(rawText) {
+    const text = String(rawText || "").trim();
+    if (!text) {
+      return;
+    }
+
+    const normalized = normalizeText(text);
+    if (!normalized) {
+      return;
+    }
+
+    const hasWakeWord = containsWakeWord(normalized);
+    const isFinishCmd = isFinishVisitCommand(normalized);
+
+    console.log("[JARVIS voice]", JSON.stringify({ text: text.slice(0, 80), stage: state.stage, hasWakeWord, isFinishCmd }));
+
+    if (!hasWakeWord) {
+      const handled = await processWithoutWakeWord(text, normalized);
+      if (!handled) {
+        console.log("[JARVIS ignored - no wake word, stage:", state.stage, "]");
+      }
+      return;
+    }
+
+    pushTranscript(VOICE_AUTHOR, text);
+
+    if (state.stage !== STAGE.RECORDING_VISIT && isWakeOnlyCommand(normalized)) {
+      await speakAndPublish("none", "Слушаю вашу команду", {}, {
+        resume: true,
+      });
+      return;
+    }
+
+    if (state.stage === STAGE.RECORDING_VISIT) {
+      if (isFinishCmd) {
+        await finishVisit();
+        return;
+      }
+      appendVisitLine(text);
+      return;
+    }
+
+    if (state.stage === STAGE.AWAITING_VISIT_CONFIRMATION) {
+      await handleVisitConfirmation(normalized);
+      return;
+    }
+
+    if (state.stage === STAGE.AWAITING_SCHEDULE_CONFIRMATION) {
+      await handleScheduleConfirmation(normalized);
+      return;
+    }
+
+    if (hasStrictVisitLock()) {
+      if (isYesCommand(normalized)) {
+        await handleVisitConfirmation(normalized);
+        return;
+      }
+
+      if (isNoCommand(normalized)) {
+        await speakAndPublish("fill_form", "Пока не подтверждены все разделы осмотра. Скажите: Да подтверждаю", {}, {
+          resume: true,
+        });
+        return;
+      }
+    }
+
+    if (state.stage === STAGE.AWAITING_SLOT_SELECTION) {
+      if (isAnalyzeScheduleCommand(normalized)) {
+        await announceCurrentAvailability();
+        return;
+      }
+
+      if (isPlaceSlotCommand(normalized) || isYesCommand(normalized) || isNoCommand(normalized)) {
+        await applyRequestedSlot(normalized);
+        return;
+      }
+
+      await speakAndPublish("check_schedule", "Назовите команду: Поставь на день время", {}, {
+        resume: true,
+      });
+      return;
+    }
+
+    if (isOpenDamumedCommand(normalized)) {
+      await openSiteCommand("damumed");
+      return;
+    }
+
+    if (isOpenSandboxCommand(normalized)) {
+      await openSiteCommand("sandbox");
+      return;
+    }
+
+    if (state.stage === STAGE.IDLE) {
+      await speakAndPublish("none", "Ожидаю команду: Джарвиз открой дамумед или Джарвиз открой песочницу", {}, {
+        resume: true,
+      });
+      return;
+    }
+
+    if (isOpenVisitCommand(normalized)) {
+      if (state.stage !== STAGE.COMMAND) {
+        await speakAndPublish("start_recording", "Сначала откройте сайт командой: Джарвиз открой дамумед или Джарвиз открой песочницу", {}, {
+          resume: true,
+        });
+        return;
+      }
+
+      if (shouldExplicitWakeForVisit(normalized)) {
+        await speakAndPublish("start_recording", "Для начала приема скажите: Джарвиз начни прием", {}, {
+          resume: true,
+        });
+        return;
+      }
+
+      await beginVisit(text);
+      return;
+    }
+
+    if (isFinishVisitCommand(normalized)) {
+      await finishVisit();
+      return;
+    }
+
+    if (isAnalyzePageCommand(normalized)) {
+      const analysis = analyzeCurrentPage();
+      await applySiteAnalysis(analysis, true);
+      return;
+    }
+
+    if (containsWakeWord(normalized) && includesAny(normalized, ["покажи дом", "статус дом", "dom status"])) {
+      const stats = toNodeStats();
+      await speakAndPublish("check_schedule", `DOM проверка: карточек пациентов ${stats.patientCards}, слотов ${stats.totalSlots}, свободных ${stats.freeSlots}, занятых ${stats.busySlots}.`, {
+        stats,
+      }, {
+        resume: true,
+      });
+      return;
+    }
+
+    if (isAnalyzeScheduleCommand(normalized)) {
+      await announceCurrentAvailability();
+      return;
+    }
+
+    if (isPlaceSlotCommand(normalized)) {
+      state.stage = STAGE.AWAITING_SLOT_SELECTION;
+      queuePersist();
+      renderAll();
+      await applyRequestedSlot(normalized);
+      return;
+    }
+
+    if (isResetFlowCommand(normalized)) {
+      await resetVisitFlow();
+      return;
+    }
+
+    if (containsWakeWord(normalized)) {
+      await speakAndPublish("none", "Команда не распознана по сценарию", {
+        rawText: text,
+      }, {
+        resume: true,
+      });
+    }
+  }
+
+  function enqueueVoiceText(text) {
+    const normalizedText = String(text || "").trim();
+    if (!normalizedText) {
+      return;
+    }
+
+    state.lastHeardText = normalizedText;
+    state.lastHeardAt = Date.now();
+    queuePersist();
+
+    console.log("[JARVIS enqueue]", JSON.stringify({
+      text: normalizedText.slice(0, 120),
+      stage: state.stage,
+      queueSizeBefore: voiceQueue.length,
+    }));
+
+    voiceQueue.push(normalizedText);
+    void drainVoiceQueue();
+  }
+
+  async function drainVoiceQueue() {
+    if (voiceQueueBusy) {
+      return;
+    }
+
+    voiceQueueBusy = true;
+
+    try {
+      while (voiceQueue.length) {
+        const next = voiceQueue.shift();
+        if (!next) {
+          continue;
+        }
+
+        try {
+          await processVoiceText(next);
+        } catch (error) {
+          console.error("[JARVIS voice processing error]", error, String(next).slice(0, 120));
+          state.recognitionError = "voice-processing-error";
+          renderAll();
+        }
+      }
+    } finally {
+      voiceQueueBusy = false;
+    }
+  }
+
+  function isPendingSiteLoaded() {
+    if (!state.pendingSiteCheck) {
+      return false;
+    }
+
+    const current = window.location.href;
+
+    if (state.pendingSiteCheck === "damumed") {
+      return urlsMatch(current, state.config.damumedUrl) || /damumed/i.test(current);
+    }
+
+    if (state.pendingSiteCheck === "sandbox") {
+      return urlsMatch(current, state.config.sandboxUrl);
+    }
+
+    return false;
+  }
+
+  async function handlePendingSiteCheck() {
+    if (!state.pendingSiteCheck) {
+      return;
+    }
+
+    if (!isPendingSiteLoaded()) {
+      state.pendingSiteCheck = null;
+      queuePersist();
+      return;
+    }
+
+    const target = state.pendingSiteCheck;
+    state.pendingSiteCheck = null;
+    queuePersist();
+
+    const analysis = analyzeRequestedSite(target);
+    await applySiteAnalysis(analysis, true);
+  }
+
+  function setupRuntimeMessageHandler() {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.onMessage) {
+      return;
+    }
+
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message && message.type === "assistant:toggleListening") {
+        void (async () => {
+          try {
+            await toggleListening();
+            sendResponse({
+              ok: true,
+              listening: state.listening,
+              stage: state.stage,
+              response: getLastResponseEnvelope(),
+            });
+          } catch (error) {
+            sendResponse({
+              ok: false,
+              error: String(error || "toggle_listening_failed"),
+            });
+          }
+        })();
+        return true;
+      }
+
+      if (message && message.type === "assistant:analyzePage") {
+        const analysis = analyzeCurrentPage();
+        sendResponse({ ok: true, ...analysis });
+        return;
+      }
+
+      if (message && message.type === "assistant:resetVisit") {
+        void resetVisitFlow();
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (message && message.type === "assistant:getStateEnvelope") {
+        const lastT = state.transcript.length > 0 ? state.transcript[state.transcript.length - 1] : null;
+        sendResponse({
+          ok: true,
+          response: getLastResponseEnvelope(),
+          stage: state.stage,
+          stageTitle: STAGE_TITLES[state.stage] || state.stage,
+          listening: state.listening,
+          sttBusy: state.sttBusy,
+          recognitionError: state.recognitionError,
+          backendLoopActive: state.backendLoopActive,
+          visitLinesCount: state.visitLines.length,
+          lastTranscriptLine: lastT ? `${lastT.author === "voice" ? "🎙" : "🤖"} ${lastT.text}` : "",
+          lastHeardText: state.lastHeardText,
+          lastHeardAt: state.lastHeardAt,
+          visitDraft: state.visitDraft || null,
+          localAiEnabled: Boolean(state.config.localAiUrl),
+          localAiEndpoint: state.config.localAiUrl || "",
+          awaitingVoiceConfirm: state.awaitingVoiceConfirm,
+        });
+        return;
+      }
+
+      if (message && message.type === "assistant:startRecording") {
+        state.stage = STAGE.RECORDING_VISIT;
+        state.visitLines = [];
+        state.visitDraft = null;
+        state.scheduleGrid = [];
+        renderAll();
+        queuePersist();
+        pageToast("Прием начат — диктуйте");
+        sendResponse({ ok: true, stage: state.stage });
+        return;
+      }
+
+      if (message && message.type === "assistant:finishRecording") {
+        void (async () => {
+          try {
+            await finishVisit();
+            sendResponse({ ok: true, stage: state.stage });
+          } catch (error) {
+            sendResponse({ ok: false, error: String(error && error.message ? error.message : error) });
+          }
+        })();
+        return true;
+      }
+
+      if (message && message.type === "assistant:forceConfirm") {
+        void (async () => {
+          try {
+            await confirmVisitAndAdvance({ total: 0, okCount: 0, forced: true });
+            sendResponse({ ok: true, stage: state.stage });
+          } catch (error) {
+            sendResponse({ ok: false, error: String(error && error.message ? error.message : error) });
+          }
+        })();
+        return true;
+      }
+
+      if (message && message.type === "assistant:applyManualDraft") {
+        void (async () => {
+          try {
+            const raw = message.payload && typeof message.payload === "object" ? message.payload : {};
+            const draft = {
+              patient: String(raw.patient || state.patientHint || "").trim(),
+              complaints: String(raw.complaints || "").trim(),
+              anamnesis: String(raw.anamnesis || "").trim(),
+              objective: String(raw.objective || "").trim(),
+              diagnosis: String(raw.diagnosis || "").trim(),
+              treatment: String(raw.treatment || "").trim(),
+              diary: String(raw.diary || "").trim(),
+              createdAt: new Date().toISOString(),
+            };
+
+            state.visitDraft = draft;
+            state.awaitingVoiceConfirm = null;
+            const result = await injectVisitDraftToDom(draft);
+            sendResponse({
+              ok: true,
+              applied: result.success,
+              verification: result.verification,
+              stage: state.stage,
+            });
+          } catch (error) {
+            sendResponse({ ok: false, error: String(error || "manual_apply_failed") });
+          }
+        })();
+        return true;
+      }
+    });
+  }
+
+  async function initAssistant() {
+    await loadStoredState();
+
+    if (ENABLE_IN_PAGE_ASSISTANT_UI) {
+      mountAssistant();
+    } else {
+      const existing = document.getElementById(ASSISTANT_ROOT_ID);
+      if (existing) {
+        existing.remove();
+      }
+    }
+
+    renderAll();
+    setupRuntimeMessageHandler();
+    await handlePendingSiteCheck();
+
+    if (state.stage === STAGE.AWAITING_LOGIN) {
+      startLoginWatcher();
+    }
+  }
+
+  void initAssistant();
+})();
