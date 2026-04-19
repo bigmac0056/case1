@@ -8,6 +8,7 @@ from src.core.schemas import (
     VoiceCommandResponse, VoiceCommandFields, VoiceCommandSchedule,
     AnalyzePageRequest, AnalyzePageResponse,
     JarvisProcessVisitRequest, JarvisProcessVisitResponse,
+    JarvisStep, JarvisPlanRequest, JarvisPlanResponse,
 )
 from src.ai.llm_client import llm_client
 from src.ai.whisper_client import transcribe_ru
@@ -1121,5 +1122,237 @@ async def jarvis_process_visit(request: JarvisProcessVisitRequest):
             treatment=str(parsed.get("treatment") or "").strip(),
             diary=str(parsed.get("diary") or "").strip(),
         )
+    except Exception:
+        return heuristic
+
+
+# ─── Multi-step RPA planner ────────────────────────────────────────────────────
+
+_ORDINAL_MAP = {
+    "первого": 0, "первый": 0, "первую": 0, "первое": 0, "первом": 0,
+    "второго": 1, "второй": 1, "вторую": 1, "второе": 1, "втором": 1,
+    "третьего": 2, "третий": 2, "третью": 2, "третье": 2, "третьем": 2,
+    "четвертого": 3, "четвертый": 3, "четвёртого": 3, "четвёртый": 3,
+}
+
+_SCREEN_LABELS = {
+    "reception": "Приемный покой",
+    "record": "Медицинская запись",
+    "schedule": "Расписание (Назначения)",
+    "diary": "Дневник процедур",
+    "audit": "Журнал действий",
+}
+
+PLAN_STEPS_SYSTEM_PROMPT = """Ты — RPA-планировщик для медицинской системы.
+Из голосовой команды врача составь список шагов на JSON.
+
+Допустимые типы шагов:
+- navigate: {"action":"navigate","screen":"reception"|"record"|"schedule"|"diary"|"audit","label":"..."}
+- open_patient: {"action":"open_patient","query":"p-001 или имя или ordinal-hint","patient_index":0,"label":"..."}
+- fill_record_fields: {"action":"fill_record_fields","fields":{complaints,anamnesis,objectiveStatus,diagnosis,recommendations,diary},"label":"..."}
+- save_record: {"action":"save_record","label":"Сохранить осмотр"}
+- fill_schedule: {"action":"fill_schedule","lfk":N,"massage":N,"psychologist":N,"working_days":N,"child_status":"deviations"|"norm","label":"..."}
+- generate_schedule: {"action":"generate_schedule","label":"Сформировать расписание"}
+- complete_procedure: {"action":"complete_procedure","procedure_id":"...","note":"...","label":"..."}
+
+Верни ТОЛЬКО JSON объект:
+{"steps": [...], "summary": "Краткое описание того, что будет сделано"}
+
+Если команда неясна или не требует действий — верни {"steps":[],"summary":"Не понял команду"}."""
+
+
+def _heuristic_plan_steps(transcript: str, current_screen: str = "", patient_opened: str = "") -> JarvisPlanResponse:
+    """Build a step plan from voice transcript without LLM."""
+    t = transcript.lower()
+    # Strip wake word
+    for wake in ("джарвис", "джарвиз", "jarvis", "жарвис"):
+        t = t.replace(wake, " ")
+    t = t.strip()
+
+    steps: list[JarvisStep] = []
+    summary_parts: list[str] = []
+
+    # ── 1. Determine target screen ─────────────────────────────────────────────
+    want_reception = any(w in t for w in ("приемн", "открой пациент", "карточк", "пациент"))
+    want_record = any(w in t for w in ("запись", "медицинск", "жалоб", "анамнез", "объектив", "диагноз", "назначен", "дневник осмотра"))
+    want_schedule = any(w in t for w in ("расписани", "лфк", "массаж", "психолог", "назначения", "сформируй", "сгенерируй"))
+    want_diary = any(w in t for w in ("дневник", "процедур", "выполн", "статус"))
+    want_audit = any(w in t for w in ("журнал", "аудит", "audit"))
+
+    # If patient needs to be opened, go to reception first (unless already there)
+    if want_reception and current_screen != "reception":
+        steps.append(JarvisStep(action="navigate", screen="reception", label="Перейти в Приемный покой"))
+        summary_parts.append("перейду в приемный покой")
+
+    # ── 2. Open patient ─────────────────────────────────────────────────────────
+    patient_query = ""
+    patient_index: int | None = None
+    for ordinal, idx in _ORDINAL_MAP.items():
+        if ordinal in t:
+            patient_index = idx
+            patient_query = f"p-{str(idx + 1).zfill(3)}"
+            break
+
+    # Also try by name pattern after "открой" / "пациент"
+    if not patient_query:
+        m_name = re.search(r"(?:открой|пациент(?:а|у)?)\s+([а-яёА-ЯЁ]{3,}(?:\s+[а-яёА-ЯЁ]+)?)", transcript, re.IGNORECASE)
+        if m_name:
+            patient_query = m_name.group(1).strip()
+
+    if want_reception and patient_query:
+        steps.append(JarvisStep(
+            action="open_patient",
+            query=patient_query,
+            patient_index=patient_index,
+            label=f"Открыть пациента {patient_query}",
+        ))
+        summary_parts.append(f"открою пациента {patient_query}")
+
+    # ── 3. Navigate to record screen if filling fields (only if no field content found yet) ─
+    # Defer this until we know fields will be filled (handled in step 4).
+
+    # ── 4. Fill record fields if mentioned ────────────────────────────────────
+    fields: dict[str, str] = {}
+    # Look for "заполни жалобы: <text>", "жалобы — <text>", etc.
+    for field_key, patterns in [
+        ("complaints",      [r"жалоб[аы]?\s*[:\-—]\s*(.+?)(?:анамнез|объектив|диагноз|назначен|дневник|$)"]),
+        ("anamnesis",       [r"анамнез\s*[:\-—]\s*(.+?)(?:объектив|диагноз|назначен|дневник|$)"]),
+        ("objectiveStatus", [r"объектив(?:но)?\s*[:\-—]\s*(.+?)(?:диагноз|назначен|дневник|$)"]),
+        ("diagnosis",       [r"диагноз\s*[:\-—]\s*(.+?)(?:назначен|дневник|$)"]),
+        ("recommendations", [r"назначени[яе]\s*[:\-—]\s*(.+?)(?:дневник|$)"]),
+        ("diary",           [r"дневник\s*[:\-—]\s*(.+?)$"]),
+    ]:
+        for pattern in patterns:
+            m = re.search(pattern, transcript, re.IGNORECASE | re.DOTALL)
+            if m:
+                fields[field_key] = m.group(1).strip()
+                break
+
+    def _already_navigating_to(screen: str) -> bool:
+        return any(s.action == "navigate" and s.screen == screen for s in steps)
+
+    if fields:
+        if current_screen != "record" and not want_reception and not _already_navigating_to("record"):
+            steps.append(JarvisStep(action="navigate", screen="record", label="Перейти к медицинской записи"))
+        steps.append(JarvisStep(action="fill_record_fields", fields=fields, label="Заполнить поля осмотра"))
+        summary_parts.append("заполню поля осмотра")
+
+    if fields and any(w in t for w in ("сохрани", "сохранить", "запиши", "save")):
+        steps.append(JarvisStep(action="save_record", label="Сохранить осмотр"))
+        summary_parts.append("сохраню осмотр")
+
+    # ── 5. Schedule ────────────────────────────────────────────────────────────
+    lfk_m = re.search(r"лфк\s+(\d+)", t)
+    massage_m = re.search(r"массаж\s+(\d+)", t)
+    psy_m = re.search(r"психолог\s+(\d+)", t)
+    days_m = re.search(r"(\d+)\s*(?:рабочих\s+)?дн[ей]", t)
+    child_norm = "norm" if "норма" in t or "нет отклонени" in t else "deviations" if "отклонени" in t else None
+
+    if want_schedule:
+        if current_screen != "schedule":
+            steps.append(JarvisStep(action="navigate", screen="schedule", label="Перейти к расписанию"))
+            summary_parts.append("перейду к расписанию")
+
+        sched_step = JarvisStep(action="fill_schedule")
+        has_sched_data = False
+        if lfk_m:
+            sched_step.lfk = int(lfk_m.group(1)); has_sched_data = True
+        if massage_m:
+            sched_step.massage = int(massage_m.group(1)); has_sched_data = True
+        if psy_m:
+            sched_step.psychologist = int(psy_m.group(1)); has_sched_data = True
+        if days_m:
+            sched_step.working_days = int(days_m.group(1)); has_sched_data = True
+        if child_norm:
+            sched_step.child_status = child_norm; has_sched_data = True
+        # Time patterns
+        cons_m = re.search(r"(?:консультаци[яию]|консультация)\s+(?:в\s+)?([0-2]?\d[:\.][0-5]\d)", transcript, re.IGNORECASE)
+        if cons_m:
+            sched_step.consultation_time = cons_m.group(1).replace(".", ":"); has_sched_data = True
+        hosp_m = re.search(r"госпитализаци[яию]\s+(?:в\s+)?([0-2]?\d[:\.][0-5]\d)", transcript, re.IGNORECASE)
+        if hosp_m:
+            sched_step.hospitalization_time = hosp_m.group(1).replace(".", ":"); has_sched_data = True
+
+        if has_sched_data:
+            sched_step.label = "Заполнить параметры расписания"
+            steps.append(sched_step)
+            summary_parts.append("заполню параметры расписания")
+
+        if any(w in t for w in ("сформируй", "создай", "запланируй", "generate", "сгенерируй")) or has_sched_data:
+            steps.append(JarvisStep(action="generate_schedule", label="Сформировать расписание"))
+            summary_parts.append("сформирую расписание")
+
+    # ── 6. Diary / complete procedure ──────────────────────────────────────────
+    if want_diary and current_screen != "diary":
+        steps.append(JarvisStep(action="navigate", screen="diary", label="Перейти к дневнику процедур"))
+        summary_parts.append("перейду к дневнику")
+
+    if want_audit:
+        steps.append(JarvisStep(action="navigate", screen="audit", label="Перейти к журналу действий"))
+        summary_parts.append("открою журнал")
+
+    summary = ", ".join(summary_parts).capitalize() if summary_parts else "Команда не распознана"
+    return JarvisPlanResponse(steps=steps, summary=summary)
+
+
+@router.post("/api/jarvis/plan-steps", response_model=JarvisPlanResponse)
+async def jarvis_plan_steps(request: JarvisPlanRequest):
+    """Convert a voice transcript into an ordered list of RPA steps for the extension to execute."""
+    transcript = (request.transcript or "").strip()
+    current_screen = (request.current_screen or "").strip()
+    patient_opened = (request.patient_opened or "").strip()
+
+    if not transcript:
+        return JarvisPlanResponse(steps=[], summary="Пустой транскрипт")
+
+    heuristic = _heuristic_plan_steps(transcript, current_screen, patient_opened)
+
+    # Try LLM for richer parsing
+    user_prompt = json.dumps({
+        "transcript": transcript,
+        "current_screen": current_screen,
+        "patient_opened": patient_opened,
+    }, ensure_ascii=False)
+
+    try:
+        payload = {
+            "model": settings.ai_default_model,
+            "prompt": user_prompt,
+            "system": PLAN_STEPS_SYSTEM_PROMPT,
+            "options": {"num_predict": 400, "num_ctx": 1024},
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+            resp = await client.post(f"{settings.ai_base_url}/chat", json=payload)
+
+        if resp.status_code >= 400:
+            return heuristic
+
+        data = resp.json()
+        llm_text = ""
+        if isinstance(data, dict):
+            msg = data.get("message", {})
+            llm_text = (msg.get("content") if isinstance(msg, dict) else "") or data.get("response", "")
+
+        parsed = _extract_json_from_llm(llm_text) if llm_text else None
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("steps"), list):
+            return heuristic
+
+        llm_steps = []
+        for raw_step in parsed["steps"]:
+            if not isinstance(raw_step, dict) or not raw_step.get("action"):
+                continue
+            try:
+                llm_steps.append(JarvisStep(**{k: v for k, v in raw_step.items() if v is not None}))
+            except Exception:
+                pass
+
+        if not llm_steps:
+            return heuristic
+
+        return JarvisPlanResponse(
+            steps=llm_steps,
+            summary=str(parsed.get("summary") or heuristic.summary),
+        )
+
     except Exception:
         return heuristic

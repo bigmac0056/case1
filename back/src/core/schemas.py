@@ -147,3 +147,46 @@ class JarvisProcessVisitResponse(BaseModel):
     diagnosis: str = ""
     treatment: str = ""
     diary: str = ""
+
+
+# ─── Multi-step RPA planner ────────────────────────────────────────────────────
+
+class JarvisStep(BaseModel):
+    """One atomic action the extension should execute on the page."""
+    action: str            # navigate | open_patient | fill_record_fields | save_record |
+                           # fill_schedule | generate_schedule | complete_procedure | wait
+    # navigate
+    screen: Optional[str] = None      # reception | record | schedule | diary | audit
+    # open_patient
+    query: Optional[str] = None       # patient ID (p-001) or ordinal hint or name
+    patient_index: Optional[int] = None  # 0-based index in patient list
+    # fill_record_fields
+    fields: Optional[dict] = None     # {complaints, anamnesis, objectiveStatus, diagnosis, recommendations, diary}
+    # fill_schedule
+    lfk: Optional[int] = None
+    massage: Optional[int] = None
+    psychologist: Optional[int] = None
+    working_days: Optional[int] = None
+    child_status: Optional[str] = None    # norm | deviations
+    start_date: Optional[str] = None      # YYYY-MM-DD
+    consultation_time: Optional[str] = None
+    consultation_end_time: Optional[str] = None
+    hospitalization_time: Optional[str] = None
+    # complete_procedure
+    procedure_id: Optional[str] = None
+    note: Optional[str] = None
+    # wait
+    ms: Optional[int] = None
+    # Human-readable label shown in the extension overlay
+    label: Optional[str] = None
+
+
+class JarvisPlanRequest(BaseModel):
+    transcript: str
+    current_screen: Optional[str] = ""
+    patient_opened: Optional[str] = ""
+
+
+class JarvisPlanResponse(BaseModel):
+    steps: list[JarvisStep] = Field(default_factory=list)
+    summary: str = ""  # e.g. "Открываю первого пациента и формирую расписание"

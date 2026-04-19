@@ -3830,6 +3830,316 @@ function parseDateFromText(normalizedText) {
     };
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  MULTI-STEP RPA EXECUTOR
+  //  Receives a plan from /api/jarvis/plan-steps and executes each
+  //  step on the live sandbox DOM with a visual progress overlay.
+  // ═══════════════════════════════════════════════════════════════
+
+  const STEP_OVERLAY_ID = "jarvis-step-overlay";
+
+  function showStepOverlay(label, current, total) {
+    let el = document.getElementById(STEP_OVERLAY_ID);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = STEP_OVERLAY_ID;
+      Object.assign(el.style, {
+        position: "fixed",
+        bottom: "72px",
+        right: "16px",
+        zIndex: "2147483647",
+        background: "rgba(10, 50, 100, 0.94)",
+        color: "#e8f0ff",
+        fontFamily: "system-ui, sans-serif",
+        fontSize: "13px",
+        lineHeight: "1.5",
+        padding: "10px 14px",
+        borderRadius: "10px",
+        boxShadow: "0 4px 24px rgba(0,0,0,.4)",
+        maxWidth: "300px",
+        pointerEvents: "none",
+        transition: "opacity 0.2s",
+      });
+      (document.body || document.documentElement).appendChild(el);
+    }
+    const progress = total > 1 ? `<span style="opacity:.6;font-size:11px"> (${current}/${total})</span>` : "";
+    el.innerHTML = `<span style="margin-right:6px">⚙️</span><strong>Джарвис:</strong> ${label}${progress}`;
+    el.style.opacity = "1";
+  }
+
+  function hideStepOverlay(delay = 1800) {
+    const el = document.getElementById(STEP_OVERLAY_ID);
+    if (!el) return;
+    setTimeout(() => {
+      el.style.opacity = "0";
+      setTimeout(() => el.remove(), 250);
+    }, delay);
+  }
+
+  function markStepOverlayDone(summaryLabel) {
+    const el = document.getElementById(STEP_OVERLAY_ID);
+    if (el) {
+      el.style.background = "rgba(10,100,40,0.94)";
+      el.innerHTML = `<span style="margin-right:6px">✅</span><strong>Готово:</strong> ${summaryLabel}`;
+    }
+    hideStepOverlay(2200);
+  }
+
+  /** Detect if the current tab is the sandbox (or damumed). */
+  function isSandboxPage() {
+    const href = window.location.href;
+    return /localhost|127\.0\.0\.1|sandbox/i.test(href) || /damumed/i.test(href);
+  }
+
+  /** Navigate the sandbox SPA to a named screen by clicking the nav button. */
+  async function stepNavigate(screen) {
+    const btn = document.querySelector(`.nav-btn[data-screen="${screen}"]`);
+    if (!btn) {
+      console.warn("[JARVIS step] nav button not found for screen:", screen);
+      return false;
+    }
+    btn.click();
+    await wait(350); // Let the SPA render the new screen
+    return true;
+  }
+
+  /** Open a patient by clicking their card or using the search input. */
+  async function stepOpenPatient(query, patientIndex) {
+    // Try direct card click first (by index or data-id)
+    const cards = Array.from(document.querySelectorAll(".patient-card"));
+    if (cards.length > 0) {
+      let target = null;
+      if (typeof patientIndex === "number" && cards[patientIndex]) {
+        target = cards[patientIndex];
+      } else if (query) {
+        // Try matching by data-id or name
+        target = cards.find((c) =>
+          (c.dataset.id || "").toLowerCase().includes(query.toLowerCase()) ||
+          c.textContent.toLowerCase().includes(query.toLowerCase())
+        ) || cards[0];
+      } else {
+        target = cards[0];
+      }
+      if (target) {
+        target.click();
+        await wait(600);
+        return true;
+      }
+    }
+
+    // Fallback: use the search input + open button
+    const input = document.getElementById("patientQuery");
+    const btn = document.getElementById("openReceptionBtn");
+    if (input && btn && query) {
+      applyInputValue(input, query);
+      await wait(80);
+      btn.click();
+      await wait(800);
+      return true;
+    }
+
+    console.warn("[JARVIS step] could not open patient:", query);
+    return false;
+  }
+
+  /** Fill schedule input fields and optionally trigger generation. */
+  async function stepFillSchedule(step) {
+    const setVal = (id, val) => {
+      const el = document.getElementById(id);
+      if (!el || val == null) return;
+      applyInputValue(el, String(val));
+      // Mark as user-edited so profile defaults don't override
+      el.dataset.userEdited = "1";
+    };
+    if (step.lfk != null) setVal("lfkCount", step.lfk);
+    if (step.massage != null) setVal("massageCount", step.massage);
+    if (step.psychologist != null) setVal("psyCount", step.psychologist);
+    if (step.working_days != null) setVal("workingDaysTarget", step.working_days);
+    if (step.start_date) setVal("startDate", step.start_date);
+    if (step.consultation_time) setVal("consultationTime", step.consultation_time);
+    if (step.consultation_end_time) setVal("consultationEndTime", step.consultation_end_time);
+    if (step.hospitalization_time) setVal("hospitalizationTime", step.hospitalization_time);
+    if (step.child_status) {
+      const sel = document.getElementById("childStatus");
+      if (sel) sel.value = step.child_status;
+    }
+    await wait(80);
+  }
+
+  /** Click the "Generate schedule" button and wait for render. */
+  async function stepGenerateSchedule() {
+    const btn = document.getElementById("generateScheduleBtn");
+    if (!btn) return false;
+    btn.click();
+    await wait(1200); // schedule generation can take a moment
+    return true;
+  }
+
+  /** Fill visit record fields via the tab-click strategy. */
+  async function stepFillRecordFields(fields) {
+    if (!fields || typeof fields !== "object") return;
+    // Map sandbox field keys → extension draft keys
+    const draft = {
+      complaints: fields.complaints || "",
+      anamnesis: fields.anamnesis || "",
+      objective: fields.objectiveStatus || fields.objective || "",
+      diagnosis: fields.diagnosis || "",
+      treatment: fields.recommendations || fields.treatment || "",
+      diary: fields.diary || "",
+    };
+    // Navigate to record screen first if needed
+    const recordScreen = document.getElementById("screen-record");
+    if (recordScreen && !recordScreen.classList.contains("active")) {
+      await stepNavigate("record");
+    }
+    await injectVisitDraftToDom(draft);
+  }
+
+  /** Click the "Save record" button. */
+  async function stepSaveRecord() {
+    const btn = document.getElementById("saveRecordBtn");
+    if (btn) { btn.click(); await wait(500); return true; }
+    return false;
+  }
+
+  /** Complete a procedure row in the diary screen. */
+  async function stepCompleteProcedure(procedureId, note) {
+    const rows = document.querySelectorAll("[data-assignment-id], .assignment-row");
+    const target = procedureId
+      ? Array.from(rows).find((r) => (r.dataset.assignmentId || r.dataset.id || "") === procedureId)
+      : rows[0];
+    if (!target) return false;
+    const doneBtn = target.querySelector("button.done-btn, button[data-action='complete'], button");
+    if (doneBtn) { doneBtn.click(); await wait(400); }
+    if (note) {
+      const noteInput = target.querySelector("input, textarea");
+      if (noteInput) { applyInputValue(noteInput, note); await wait(80); }
+    }
+    return true;
+  }
+
+  /** Execute a single step and return true on success. */
+  async function executeSingleStep(step) {
+    const action = step.action;
+    switch (action) {
+      case "navigate":
+        return await stepNavigate(step.screen);
+      case "open_patient":
+        return await stepOpenPatient(step.query, step.patient_index);
+      case "fill_record_fields":
+        await stepFillRecordFields(step.fields);
+        return true;
+      case "save_record":
+        return await stepSaveRecord();
+      case "fill_schedule":
+        await stepFillSchedule(step);
+        return true;
+      case "generate_schedule":
+        return await stepGenerateSchedule();
+      case "complete_procedure":
+        return await stepCompleteProcedure(step.procedure_id, step.note);
+      case "wait":
+        await wait(step.ms || 500);
+        return true;
+      default:
+        console.warn("[JARVIS step] unknown action:", action);
+        return false;
+    }
+  }
+
+  /** Derive backend base URL from the configured localAiUrl (strips the path). */
+  function getBackendBase() {
+    try {
+      const raw = state.config.localAiUrl || "http://127.0.0.1:8000/api/jarvis/process-visit";
+      const u = new URL(raw);
+      return `${u.protocol}//${u.host}`;
+    } catch {
+      return "http://127.0.0.1:8000";
+    }
+  }
+
+  /** Fetch a step plan from the backend planner. */
+  async function fetchStepPlan(transcript) {
+    const currentScreen = (() => {
+      const active = document.querySelector(".nav-btn.active");
+      return active ? (active.dataset.screen || "") : "";
+    })();
+    const patientOpened = (() => {
+      const el = document.getElementById("currentPatient");
+      return el ? el.textContent.trim().slice(0, 80) : "";
+    })();
+
+    try {
+      const resp = await fetch(`${getBackendBase()}/api/jarvis/plan-steps`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript, current_screen: currentScreen, patient_opened: patientOpened }),
+      });
+      if (!resp.ok) return null;
+      return await resp.json(); // {steps: [...], summary: "..."}
+    } catch (err) {
+      console.warn("[JARVIS plan-steps] fetch failed:", err);
+      return null;
+    }
+  }
+
+  /** Detect if a command looks like a multi-step / navigation command. */
+  function isMultiStepCommand(normalized) {
+    return (
+      includesAny(normalized, [
+        "открой первого", "открой второго", "открой третьего",
+        "открой пациент", "карточку пациент", "карточка первого",
+        "перейди к расписани", "перейди в расписани",
+        "поставь лфк", "поставь массаж", "поставь психолог",
+        "лфк ", "массаж ", "психолог ",
+        "сформируй расписани", "создай расписани", "запланируй расписани",
+        "заполни жалобы", "заполни анамнез", "заполни диагноз",
+        "перейди к журналу", "открой журнал", "открой аудит",
+        "перейди к дневнику", "открой дневник процедур",
+        "сохрани осмотр",
+      ])
+    );
+  }
+
+  /** Main entry point: fetch plan → execute step-by-step with overlay. */
+  async function executeMultiStepCommand(rawText) {
+    showStepOverlay("Планирую шаги...", 0, 0);
+    publishResponse("open_reception", "🔄 Планирование: " + rawText.slice(0, 60), {});
+
+    const plan = await fetchStepPlan(rawText);
+    if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) {
+      hideStepOverlay(400);
+      return false; // fall through to normal handling
+    }
+
+    const { steps, summary } = plan;
+    publishResponse("open_reception", `📋 План (${steps.length} шагов): ${summary}`, { steps });
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const label = step.label || step.action;
+      showStepOverlay(label, i + 1, steps.length);
+      publishResponse("open_reception", `▶ Шаг ${i + 1}/${steps.length}: ${label}`, { stepIndex: i });
+
+      try {
+        const ok = await executeSingleStep(step);
+        if (!ok) {
+          publishResponse("none", `⚠️ Шаг ${i + 1} не выполнен: ${label}`, {});
+        }
+      } catch (err) {
+        console.error("[JARVIS step executor] step failed:", step, err);
+        publishResponse("none", `❌ Ошибка на шаге ${i + 1}: ${label}`, { error: String(err) });
+      }
+
+      // Short pause between steps so the user can see each action
+      if (i < steps.length - 1) await wait(300);
+    }
+
+    markStepOverlayDone(summary);
+    await speakAndPublish("open_reception", summary, {}, { resume: true });
+    return true;
+  }
+
   async function injectVisitDraftToDom(draft) {
     if (!draft) {
       return { success: false, filled: 0, verification: null };
@@ -5328,6 +5638,18 @@ function parseDateFromText(normalizedText) {
         resume: true,
       });
       return;
+    }
+
+    // ── Multi-step RPA: detect navigation / automation commands and plan them ──
+    // Only when on a sandbox/damumed page, not mid-recording, and not a slot-selection loop.
+    if (
+      isSandboxPage() &&
+      state.stage === STAGE.COMMAND &&
+      isMultiStepCommand(normalized)
+    ) {
+      const handled = await executeMultiStepCommand(text);
+      if (handled) return;
+      // If plan returned empty steps, fall through to legacy handlers below.
     }
 
     if (state.stage === STAGE.RECORDING_VISIT) {
