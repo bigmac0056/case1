@@ -134,6 +134,9 @@ class VoiceCommandResponse(BaseModel):
 class JarvisProcessVisitRequest(BaseModel):
     patient_hint: Optional[str] = None
     transcript_lines: list[str] = Field(default_factory=list)
+    intent: Optional[str] = None
+    stage: Optional[str] = None
+    raw_text: Optional[str] = None
 
 
 class JarvisProcessVisitResponse(BaseModel):

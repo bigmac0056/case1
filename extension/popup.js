@@ -16,6 +16,7 @@ const btnTalk = document.getElementById("btnTalk");
 const btnOpenDamumedVoice = document.getElementById("btnOpenDamumedVoice");
 const btnOpenSandboxVoice = document.getElementById("btnOpenSandboxVoice");
 const holdToTalkToggle = document.getElementById("holdToTalkToggle");
+const ttsToggle = document.getElementById("ttsToggle");
 const btnPushToTalk = document.getElementById("btnPushToTalk");
 const btnStartRecording = document.getElementById("btnStartRecording");
 const btnFinishRecording = document.getElementById("btnFinishRecording");
@@ -27,6 +28,10 @@ const btnApplyManual = document.getElementById("btnApplyManual");
 const manualStatus = document.getElementById("manualStatus");
 const fileMedical = document.getElementById("fileMedical");
 const fileTemplate = document.getElementById("fileTemplate");
+const btnPickMedical = document.getElementById("btnPickMedical");
+const btnPickTemplate = document.getElementById("btnPickTemplate");
+const btnUseBuiltInTemplate = document.getElementById("btnUseBuiltInTemplate");
+const pickedFiles = document.getElementById("pickedFiles");
 const btnApplyFiles = document.getElementById("btnApplyFiles");
 const fileStatus = document.getElementById("fileStatus");
 const btnCompleteByVoice = document.getElementById("btnCompleteByVoice");
@@ -41,6 +46,49 @@ const fieldObjective = document.getElementById("fieldObjective");
 const fieldDiagnosis = document.getElementById("fieldDiagnosis");
 const fieldTreatment = document.getElementById("fieldTreatment");
 const fieldDiary = document.getElementById("fieldDiary");
+
+let manualFieldsDirty = false;
+let lastDraftStamp = "";
+
+function isManualFieldElement(el) {
+  if (!el || !el.id) {
+    return false;
+  }
+  return [
+    "fieldPatient",
+    "fieldComplaints",
+    "fieldAnamnesis",
+    "fieldObjective",
+    "fieldDiagnosis",
+    "fieldTreatment",
+    "fieldDiary",
+  ].includes(el.id);
+}
+
+function getDraftStamp(draft) {
+  if (!draft || typeof draft !== "object") {
+    return "";
+  }
+
+  const createdAt = String(draft.createdAt || "").trim();
+  if (createdAt) {
+    return createdAt;
+  }
+
+  const snapshot = [
+    draft.patient,
+    draft.complaints,
+    draft.anamnesis,
+    draft.objective,
+    draft.diagnosis,
+    draft.treatment,
+    draft.diary,
+  ]
+    .map((item) => String(item || "").trim())
+    .join("|");
+
+  return snapshot;
+}
 
 const damumedInput = document.getElementById("damumed-url");
 const sandboxInput = document.getElementById("sandbox-url");
@@ -122,6 +170,24 @@ function setServiceStatus(message, isError) {
   }
   serviceStatus.textContent = message;
   serviceStatus.className = isError ? "fill-status error" : "fill-status";
+}
+
+function refreshPickedFilesLabel() {
+  if (!pickedFiles) {
+    return;
+  }
+
+  const med = fileMedical && fileMedical.files && fileMedical.files[0] ? fileMedical.files[0].name : "";
+  const tpl = fileTemplate && fileTemplate.files && fileTemplate.files[0] ? fileTemplate.files[0].name : "";
+  if (!med && !tpl) {
+    pickedFiles.textContent = "Файлы не выбраны";
+    return;
+  }
+
+  const parts = [];
+  if (med) parts.push(`Медфайл: ${med}`);
+  if (tpl) parts.push(`Шаблон: ${tpl}`);
+  pickedFiles.textContent = parts.join(" | ");
 }
 
 function mergeDraft(base, extra) {
@@ -240,6 +306,21 @@ async function applyFileAndTemplateToDraft() {
   fillManualFieldsFromDraft(merged);
   const mergedFields = Object.keys(merged).filter((key) => String(merged[key] || "").trim()).length;
   setFileStatus(`Интегрировано из файлов. Полей с данными: ${mergedFields}`, false);
+}
+
+function useBuiltInTemplate() {
+  const sample = {
+    patient: "ДЕМО ПАЦИЕНТ",
+    complaints: "Жалобы на слабость и быструю утомляемость.",
+    anamnesis: "Состояние наблюдается несколько дней, положительная динамика неполная.",
+    objective: "Общее состояние удовлетворительное, сознание ясное, гемодинамика стабильна.",
+    diagnosis: "Основной диагноз по профилю реабилитации.",
+    treatment: "Рекомендован курс ЛФК, массаж, психологическое сопровождение.",
+    diary: "Процедура выполнена, переносимость удовлетворительная.",
+  };
+  fillManualFieldsFromDraft(sample, true);
+  lastDraftStamp = getDraftStamp(sample);
+  setFileStatus("Встроенный демо-шаблон загружен", false);
 }
 
 async function markServiceCompletedNow() {
@@ -390,7 +471,11 @@ async function checkBackend() {
   }
 }
 
-function fillManualFieldsFromDraft(draft) {
+function fillManualFieldsFromDraft(draft, force) {
+  if (!force && manualFieldsDirty) {
+    return;
+  }
+
   const source = draft && typeof draft === "object" ? draft : {};
   fieldPatient.value = String(source.patient || "");
   fieldComplaints.value = String(source.complaints || "");
@@ -399,6 +484,7 @@ function fillManualFieldsFromDraft(draft) {
   fieldDiagnosis.value = String(source.diagnosis || "");
   fieldTreatment.value = String(source.treatment || "");
   fieldDiary.value = String(source.diary || "");
+  manualFieldsDirty = false;
 }
 
 async function refreshContentState() {
@@ -433,6 +519,8 @@ async function refreshContentState() {
       const localAiEnabled = Boolean(envelope.localAiEnabled);
       const holdToTalk = Boolean(envelope.holdToTalk);
       const holdingToTalk = Boolean(envelope.holdingToTalk);
+      const ttsBlocked = Boolean(envelope.ttsBlocked);
+      const ttsEnabled = envelope.ttsEnabled !== false;
       voiceDot.className = `dot ${listening ? "dot-on" : "dot-off"}`;
       voiceLabel.textContent = listening
         ? (backendLoopActive ? "микрофон вкл (backend stt)" : "микрофон вкл")
@@ -440,6 +528,10 @@ async function refreshContentState() {
 
       if (holdToTalkToggle) {
         holdToTalkToggle.checked = holdToTalk;
+      }
+
+      if (ttsToggle) {
+        ttsToggle.checked = ttsEnabled;
       }
 
       if (btnPushToTalk) {
@@ -457,6 +549,10 @@ async function refreshContentState() {
           statusText.textContent = `Локальная ИИ подключена: ${endpoint}`;
           statusBar.classList.remove("hidden");
         }
+      }
+
+      if (ttsBlocked) {
+        setStatus("Озвучка заблокирована браузером (TTS not-allowed). Работа распознавания продолжается.", true);
       }
       if (btnTalk) {
         btnTalk.textContent = listening ? "⏹ Остановить" : "🎙️ Говорить";
@@ -519,7 +615,30 @@ async function refreshContentState() {
         ? lastResponse.data.draft : null;
       const draft = directDraft || responseDraft;
       if (draft) {
-        fillManualFieldsFromDraft(draft);
+        const stamp = getDraftStamp(draft);
+        const isNewDraft = Boolean(stamp) && stamp !== lastDraftStamp;
+        fillManualFieldsFromDraft(draft, isNewDraft);
+        if (stamp) {
+          lastDraftStamp = stamp;
+        }
+      } else if (lastResponse && lastResponse.action === "fill_form") {
+        setManualStatus("Черновик пустой. Выберите шаблон в блоке 'Файлы и шаблоны' и нажмите 'Интегрировать'.", true);
+      }
+
+      if (stage === "awaiting_visit_confirmation") {
+        const currentDraft = {
+          patient: String(fieldPatient && fieldPatient.value ? fieldPatient.value : "").trim(),
+          complaints: String(fieldComplaints && fieldComplaints.value ? fieldComplaints.value : "").trim(),
+          anamnesis: String(fieldAnamnesis && fieldAnamnesis.value ? fieldAnamnesis.value : "").trim(),
+          objective: String(fieldObjective && fieldObjective.value ? fieldObjective.value : "").trim(),
+          diagnosis: String(fieldDiagnosis && fieldDiagnosis.value ? fieldDiagnosis.value : "").trim(),
+          treatment: String(fieldTreatment && fieldTreatment.value ? fieldTreatment.value : "").trim(),
+          diary: String(fieldDiary && fieldDiary.value ? fieldDiary.value : "").trim(),
+        };
+        const filled = Object.values(currentDraft).filter((value) => String(value || "").trim().length > 0).length;
+        if (filled < 3) {
+          setManualStatus("Заполните минимум 3 поля и нажмите 'Внести в форму вручную', затем подтвердите голосом.", true);
+        }
       }
 
       // Suppress network mic error — it's expected on HTTP and fixed by backend STT restart
@@ -528,6 +647,13 @@ async function refreshContentState() {
       }
     }
   } catch (_error) {
+    const msg = String(_error && _error.message ? _error.message : _error || "");
+    const isTransient = /Receiving end does not exist|Could not establish connection/i.test(msg);
+    if (isTransient) {
+      setStatus("Вкладка перезагружалась. Подождите 1-2 сек, связь восстановится автоматически.", true);
+      return;
+    }
+
     damumedWarn.classList.remove("hidden");
     voiceDot.className = "dot dot-off";
     voiceLabel.textContent = "нет связи с вкладкой";
@@ -620,7 +746,13 @@ async function onApplyManualClick() {
     }
 
     const verification = response.verification || { okCount: 0, total: 0 };
-    setManualStatus(`Внесено. DOM проверка: ${verification.okCount}/${verification.total}`, false);
+    if (verification.manual) {
+      setManualStatus("Черновик сохранен. Теперь скажите: Да подтверждаю", false);
+    } else {
+      setManualStatus(`Внесено. DOM проверка: ${verification.okCount}/${verification.total}`, false);
+    }
+    manualFieldsDirty = false;
+    lastDraftStamp = `${Date.now()}`;
   } catch (error) {
     setManualStatus(`Ошибка ручного внесения: ${String(error && error.message ? error.message : error)}`, true);
   }
@@ -646,6 +778,21 @@ holdToTalkToggle?.addEventListener("change", async () => {
     setStatus(enabled ? "Push-to-talk включен" : "Push-to-talk выключен", false);
   } catch (error) {
     setStatus(`Ошибка режима PTT: ${String(error && error.message ? error.message : error)}`, true);
+    await refreshContentState();
+  }
+});
+
+ttsToggle?.addEventListener("change", async () => {
+  try {
+    const enabled = Boolean(ttsToggle.checked);
+    const response = await sendToAssistant("assistant:setTtsEnabled", { enabled });
+    if (!response || !response.ok) {
+      throw new Error((response && response.error) || "set_tts_failed");
+    }
+    setStatus(enabled ? "Озвучка включена" : "Озвучка отключена (демо-режим)", false);
+    await refreshContentState();
+  } catch (error) {
+    setStatus(`Ошибка переключения TTS: ${String(error && error.message ? error.message : error)}`, true);
     await refreshContentState();
   }
 });
@@ -745,6 +892,15 @@ btnApplyManual?.addEventListener("click", () => {
   void onApplyManualClick();
 });
 
+[fieldPatient, fieldComplaints, fieldAnamnesis, fieldObjective, fieldDiagnosis, fieldTreatment, fieldDiary]
+  .forEach((input) => {
+    input?.addEventListener("input", (event) => {
+      if (isManualFieldElement(event.target)) {
+        manualFieldsDirty = true;
+      }
+    });
+  });
+
 btnApplyFiles?.addEventListener("click", () => {
   void (async () => {
     try {
@@ -756,6 +912,42 @@ btnApplyFiles?.addEventListener("click", () => {
       btnApplyFiles.disabled = false;
     }
   })();
+});
+
+btnPickMedical?.addEventListener("click", () => {
+  try {
+    if (fileMedical && typeof fileMedical.showPicker === "function") {
+      fileMedical.showPicker();
+    } else if (fileMedical) {
+      fileMedical.click();
+    }
+  } catch (_error) {
+    if (fileMedical) fileMedical.click();
+  }
+});
+
+btnPickTemplate?.addEventListener("click", () => {
+  try {
+    if (fileTemplate && typeof fileTemplate.showPicker === "function") {
+      fileTemplate.showPicker();
+    } else if (fileTemplate) {
+      fileTemplate.click();
+    }
+  } catch (_error) {
+    if (fileTemplate) fileTemplate.click();
+  }
+});
+
+fileMedical?.addEventListener("change", () => {
+  refreshPickedFilesLabel();
+});
+
+fileTemplate?.addEventListener("change", () => {
+  refreshPickedFilesLabel();
+});
+
+btnUseBuiltInTemplate?.addEventListener("click", () => {
+  useBuiltInTemplate();
 });
 
 btnCompleteNow?.addEventListener("click", () => {
@@ -861,6 +1053,7 @@ void (async () => {
   await loadUrls();
   await checkBackend();
   await refreshContentState();
+  refreshPickedFilesLabel();
   logActivity("Popup открыт, backend проверен");
   bindPushToTalkButton();
 

@@ -37,6 +37,10 @@
           <label class="toggle-label" for="holdToTalkToggle">Push-to-talk (зажми и говори)</label>
           <input id="holdToTalkToggle" type="checkbox" />
         </div>
+        <div class="toggle-row">
+          <label class="toggle-label" for="ttsToggle">Озвучка (TTS)</label>
+          <input id="ttsToggle" type="checkbox" />
+        </div>
         <button id="btnPushToTalk" class="btn-action hidden">🎤 Зажми и говори</button>
 
         <div id="stageBar" class="stage-bar">
@@ -83,19 +87,20 @@
           <textarea id="fieldDiary" rows="2" placeholder="Введите или проверьте дневник"></textarea>
         </div>
         <button id="btnApplyManual" class="btn-primary" style="width: 100%">Внести в форму вручную</button>
+        <div class="tip">Если черновик пустой: заполните 3+ поля, нажмите кнопку выше, потом скажите "Да подтверждаю".</div>
         <div id="manualStatus" class="fill-status"></div>
       </section>
 
       <section class="card">
         <div class="section-label">Файлы и шаблоны (MVP)</div>
-        <div class="field-row">
-          <label class="field-label">Загрузка PDF/текста</label>
-          <input id="fileMedical" type="file" accept=".pdf,.txt,.md,.json,.doc,.docx" />
+        <div class="action-grid">
+          <button id="btnPickMedical" class="btn-action">📄 Выбрать медфайл</button>
+          <button id="btnPickTemplate" class="btn-action">🧩 Выбрать шаблон</button>
         </div>
-        <div class="field-row">
-          <label class="field-label">Шаблон врача (JSON/TXT)</label>
-          <input id="fileTemplate" type="file" accept=".json,.txt,.md" />
-        </div>
+        <input id="fileMedical" class="hidden-file" type="file" accept=".pdf,.txt,.md,.json,.doc,.docx" />
+        <input id="fileTemplate" class="hidden-file" type="file" accept=".json,.txt,.md" />
+        <div id="pickedFiles" class="tip">Файлы не выбраны</div>
+        <button id="btnUseBuiltInTemplate" class="btn-action">🧪 Использовать демо-шаблон</button>
         <button id="btnApplyFiles" class="btn-action">📎 Интегрировать в черновик</button>
         <div id="fileStatus" class="fill-status"></div>
       </section>

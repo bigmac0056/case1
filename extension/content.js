@@ -43,6 +43,8 @@
     sandboxUrl: "jarvis_sandbox_url",
     localAiUrl: "jarvis_local_ai_url",
     holdToTalk: "jarvis_hold_to_talk",
+    autoResumeListening: "jarvis_auto_resume_listening",
+    ttsEnabled: "jarvis_tts_enabled",
     session: "jarvis_assistant_session",
   };
 
@@ -81,8 +83,9 @@
   const BACKEND_STT_CHUNK_MS = 4000;
   const BACKEND_STT_MIN_TEXT_CHARS = 2;
   const SLOT_REQUEST_TTL_MS = 15000;
-  const AUTO_SCHEDULE_AFTER_VISIT = false;
+  const AUTO_SCHEDULE_AFTER_VISIT = true;
   const DEMO_SAFE_MODE = true;
+  const RECORD_AS_DICTAPHONE = true;
   const VISIT_FIELD_TITLES = {
     complaints: "жалобы",
     anamnesis: "анамнез",
@@ -97,10 +100,13 @@
     listening: false,
     recognitionRunning: false,
     narratorSpeaking: false,
+    ttsBlocked: false,
+    ttsEnabled: true,
     recognitionError: "",
     recognition: null,
     backendStream: null,
     backendRecorder: null,
+    fullVisitAudioChunks: [],
     backendLoopActive: false,
     backendStopRequested: false,
     transcript: [],
@@ -597,6 +603,11 @@
 
     const canonicalByAlias = {
       джарвис: "джарвиз",
+      дарвис: "джарвиз",
+      дарвиз: "джарвиз",
+      джорвис: "джарвиз",
+      джорвиз: "джарвиз",
+      чарвис: "джарвиз",
       джарвич: "джарвиз",
       джарвикс: "джарвиз",
       джарвиc: "джарвиз",
@@ -617,6 +628,7 @@
       jarwiz: "jarvis",
       jervis: "jarvis",
       jarves: "jarvis",
+      darvis: "jarvis",
       charles: "jarvis",
       charls: "jarvis",
       jarv: "jarvis",
@@ -630,6 +642,11 @@
 
   function includesAny(source, samples) {
     return samples.some((sample) => source.includes(sample));
+  }
+
+  function hasToken(normalized, token) {
+    const tokens = String(normalized || "").split(/\s+/).filter(Boolean);
+    return tokens.includes(String(token || "").trim());
   }
 
   function escapeHtml(value) {
@@ -814,6 +831,10 @@
     const wakeTokens = new Set([
       "джарвиз",
       "джарвис",
+      "джорвис",
+      "джорвиз",
+      "чарвис",
+      "дарвис",
       "джарвич",
       "джарви",
       "джарв",
@@ -839,6 +860,7 @@
       STAGE.RECORDING_VISIT,
       STAGE.AWAITING_VISIT_CONFIRMATION,
       STAGE.AWAITING_SCHEDULE_CONFIRMATION,
+      STAGE.AWAITING_SLOT_SELECTION,
     ]);
 
     if (nonStrictStages.has(stage)) {
@@ -1349,6 +1371,8 @@
       STORAGE_KEYS.sandboxUrl,
       STORAGE_KEYS.localAiUrl,
       STORAGE_KEYS.holdToTalk,
+      STORAGE_KEYS.autoResumeListening,
+      STORAGE_KEYS.ttsEnabled,
       STORAGE_KEYS.session,
     ]);
 
@@ -1359,6 +1383,11 @@
     state.config.localAiUrl =
       normalizeConfiguredUrl(data[STORAGE_KEYS.localAiUrl]) || DEFAULTS.localAiUrl;
     state.holdToTalk = Boolean(data[STORAGE_KEYS.holdToTalk]);
+    state.ttsEnabled = data[STORAGE_KEYS.ttsEnabled] !== false;
+    const autoResume = data[STORAGE_KEYS.autoResumeListening];
+    if (autoResume !== false) {
+      await storageSet({ [STORAGE_KEYS.autoResumeListening]: true });
+    }
 
     const saved = data[STORAGE_KEYS.session];
     if (saved && typeof saved === "object") {
@@ -1578,6 +1607,20 @@
     });
   }
 
+  async function transcribeFullVisitAudio() {
+    if (!state.fullVisitAudioChunks.length) {
+      return "";
+    }
+
+    try {
+      const blob = new Blob(state.fullVisitAudioChunks, { type: "audio/webm" });
+      const text = await backendTranscribeBlob(blob);
+      return String(text || "").trim();
+    } catch (_error) {
+      return "";
+    }
+  }
+
   async function runBackendTranscriptionLoop() {
     if (!state.listening || state.narratorSpeaking || state.backendLoopActive) {
       return;
@@ -1608,6 +1651,7 @@
     }
 
     state.backendLoopActive = true;
+    state.fullVisitAudioChunks = [];
     renderAll();
 
       while (state.listening && !state.backendStopRequested && !state.narratorSpeaking) {
@@ -1634,6 +1678,9 @@
           recorder.ondataavailable = (event) => {
             if (event.data && event.data.size > 0) {
               chunks.push(event.data);
+              if (RECORD_AS_DICTAPHONE) {
+                state.fullVisitAudioChunks.push(event.data);
+              }
             }
           };
 
@@ -1794,6 +1841,12 @@
 
     pushTranscript(JARVIS_AUTHOR, value);
 
+    if (!state.ttsEnabled) {
+      state.narratorSpeaking = false;
+      renderAll();
+      return Promise.resolve();
+    }
+
     stopRecognitionRuntime();
     state.narratorSpeaking = true;
     renderAll();
@@ -1844,6 +1897,11 @@
       utterance.onend = () => finalize("onend");
       utterance.onerror = (e) => {
         console.error("[JARVIS TTS error]", e.error, value.slice(0, 60));
+        if (e && (e.error === "not-allowed" || e.error === "service-not-allowed")) {
+          state.ttsBlocked = true;
+          queuePersist();
+          renderAll();
+        }
         finalize("onerror");
       };
 
@@ -1863,6 +1921,7 @@
 
     state.listening = true;
     state.recognitionError = "";
+    state.ttsBlocked = false;
     state.sttBusy = false;
     renderAll();
 
@@ -1884,6 +1943,9 @@
   function stopListening() {
     state.listening = false;
     state.sttBusy = false;
+    if (!RECORD_AS_DICTAPHONE) {
+      state.fullVisitAudioChunks = [];
+    }
     void stopBackendTranscriptionLoop();
     stopRecognitionRuntime();
     renderAll();
@@ -1928,7 +1990,10 @@
       return true;
     }
 
-    const canonical = normalizeWakeVariants(normalized);
+    const canonical = normalizeWakeVariants(normalized)
+      .replace(/\b(ты|тут|слышишь|на\s+связи|живой|есть|онлайн)\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
     if (!canonical) {
       return false;
     }
@@ -1939,6 +2004,39 @@
   }
 
   async function processWithoutWakeWord(text, normalized) {
+    if (state.stage === STAGE.COMMAND) {
+      if (isOpenVisitCommand(normalized) || includesAny(normalized, ["начни", "начнем", "начни прием", "начать прием"])) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await beginVisit(`джарвиз ${text}`);
+        return true;
+      }
+
+      if (isFinishVisitCommand(normalized) || includesAny(normalized, ["заверши", "стоп", "останови прием"])) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await finishVisit();
+        return true;
+      }
+
+      if (isOpenDamumedCommand(normalized) || includesAny(normalized, ["открой дамумед", "открой damumed"])) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await openSiteCommand("damumed");
+        return true;
+      }
+
+      if (isOpenSandboxCommand(normalized) || includesAny(normalized, ["открой песочницу", "открой sandbox", "песочницу", "первого пациента", "первый пациент"])) {
+        pushTranscript(VOICE_AUTHOR, text);
+        if (includesAny(normalized, ["первого пациента", "первый пациент"])) {
+          const opened = await openFirstPatientFromDom();
+          if (!opened) {
+            await speakAndPublish("open_site", "Не нашел карточку первого пациента на этой вкладке.", {}, { resume: true });
+          }
+        } else {
+          await openSiteCommand("sandbox");
+        }
+        return true;
+      }
+    }
+
     if (state.stage === STAGE.RECORDING_VISIT) {
       appendVisitLine(text);
       console.log("[JARVIS visit line]", text.slice(0, 60));
@@ -1951,6 +2049,19 @@
         await handleVisitConfirmation(normalized);
         return true;
       }
+
+      if (includesAny(normalized, ["да подтверждаю", "подтверждаю", "ok", "ок"])) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await handleVisitConfirmation("да подтверждаю");
+        return true;
+      }
+
+      if (includesAny(normalized, ["нет", "не подтверждаю", "отмена"])) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await handleVisitConfirmation("нет");
+        return true;
+      }
+
       return false;
     }
 
@@ -1964,6 +2075,42 @@
     }
 
     if (state.stage === STAGE.AWAITING_SLOT_SELECTION) {
+      if (isOpenVisitCommand(normalized) || includesAny(normalized, ["начни", "начнем", "начни прием", "начать прием"])) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await beginVisit(`джарвиз ${text}`);
+        return true;
+      }
+
+      if (isSlotConfirmationIntent(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await applyRequestedSlot(normalized);
+        return true;
+      }
+
+      if (isOpenDamumedCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await openSiteCommand("damumed");
+        return true;
+      }
+
+      if (isOpenSandboxCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await openSiteCommand("sandbox");
+        return true;
+      }
+
+      if (isOpenVisitCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await beginVisit(text);
+        return true;
+      }
+
+      if (isFinishVisitCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await finishVisit();
+        return true;
+      }
+
       if (isAnalyzeScheduleCommand(normalized)) {
         pushTranscript(VOICE_AUTHOR, text);
         await announceCurrentAvailability();
@@ -2024,7 +2171,12 @@
   }
 
   function isOpenVisitCommand(normalized) {
-    return matchCommand(normalized, "startVisit");
+    return matchCommand(normalized, "startVisit") || includesAny(normalized, [
+      "начни новый прием",
+      "начни новый приём",
+      "новый прием",
+      "новый приём",
+    ]);
   }
 
   function isFinishVisitCommand(normalized) {
@@ -2079,6 +2231,19 @@
       "запиши в любое свободное",
       "запиши в свободное",
       "запиши на ближайшее свободное",
+      "поставь на любое свободное",
+      "поставь на ближайшее свободное",
+      "поставь на ближайшую дату",
+      "на ближайшую дату",
+      "на любую ближайшую дату",
+      "поставь на любую ближайшую дату",
+      "выбери ближайшую дату",
+      "самую ближайшую дату",
+      "любую ближайшую",
+      "подбери ближайшую",
+      "подбери свободную",
+      "подбери слот",
+      "выбери слот",
       "в любое свободное время",
       "в свободное время",
       "на любое свободное",
@@ -2122,6 +2287,42 @@
       timeTo,
       timeLabel,
     };
+  }
+
+  function seemsLikeClosestFreeSlotIntent(normalized) {
+    return includesAny(normalized, [
+      "ближайш",
+      "любую",
+      "самую",
+      "первую свобод",
+      "любой свобод",
+      "на любую дату",
+      "на ближайшую дату",
+      "выбери слот",
+      "подбери слот",
+      "подбери свобод",
+      "найди слот",
+    ]);
+  }
+
+  function isSlotConfirmationIntent(normalized) {
+    const phrase = includesAny(normalized, [
+      "подтверждаю",
+      "подтверд",
+      "да подтверждаю",
+      "ok",
+      "ок",
+      "подходит",
+      "берем",
+      "берем этот",
+    ]);
+
+    if (phrase) {
+      return true;
+    }
+
+    // Only treat bare "да" as confirmation when it's a standalone token
+    return hasToken(normalized, "да");
   }
 
   function isResetFlowCommand(normalized) {
@@ -2204,7 +2405,10 @@
 
     if (announce) {
       extractSlotsFromPageDom();
-      await speakAndPublish("open_site", "Вход выполнен. Скажите: Джарвиз начни прием", {
+      const speech = state.ttsBlocked
+        ? "Вход выполнен. Готов к командам."
+        : "Вход выполнен. Скажите: Джарвиз начни прием";
+      await speakAndPublish("open_site", speech, {
         site: analysis.site,
         loginRequired: false,
       }, { resume: state.listening });
@@ -2904,7 +3108,14 @@ function parseDateFromText(normalizedText) {
   }
 
   function dateToKey(date) {
-    return date.toISOString().slice(0, 10);
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+      return "";
+    }
+
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
   }
 
   function dateToLabel(date) {
@@ -3784,6 +3995,36 @@ function parseDateFromText(normalizedText) {
     return visitOpened || openedPatient;
   }
 
+  async function openFirstPatientFromDom() {
+    const cards = locatePatientCards();
+    if (!cards.length) {
+      return false;
+    }
+
+    const first = cards[0];
+    if (!first) {
+      return false;
+    }
+
+    const actionInsideCard = findActionButtonInside(
+      first,
+      DOM_CONFIG.patient.openButtonsSelectors,
+      DOM_CONFIG.patient.openButtonsKeywords
+    );
+
+    if (actionInsideCard && clickElementSafe(actionInsideCard)) {
+      await wait(350);
+      return true;
+    }
+
+    if (clickElementSafe(first)) {
+      await wait(350);
+      return true;
+    }
+
+    return false;
+  }
+
   async function runLocalAiProcessing(visitLines, patientHint) {
     const endpoint = state.config.localAiUrl;
     if (!endpoint) {
@@ -3827,6 +4068,76 @@ function parseDateFromText(normalizedText) {
     } catch (_error) {
       return null;
     }
+  }
+
+  async function runLocalAssistantFallback(rawText, stage) {
+    const endpoint = state.config.localAiUrl;
+    if (!endpoint) {
+      return "";
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 1500);
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        mode: "cors",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          intent: "assistant_fallback",
+          stage: String(stage || state.stage || ""),
+          raw_text: String(rawText || "").trim(),
+          patient_hint: state.patientHint || "",
+          transcript_lines: [],
+        }),
+      });
+
+      if (!response.ok) {
+        return "";
+      }
+
+      const data = await response.json();
+      const candidate = [data && data.treatment, data && data.diary, data && data.objective]
+        .map((item) => String(item || "").trim())
+        .find(Boolean);
+      clearTimeout(timer);
+      return candidate || "";
+    } catch (_error) {
+      clearTimeout(timer);
+      return "";
+    }
+  }
+
+  function buildContextualFallbackSpeech(rawText, stage) {
+    const normalized = normalizeText(rawText || "");
+
+    if (stage === STAGE.AWAITING_VISIT_CONFIRMATION) {
+      return "Сейчас этап подтверждения. Скажите: Да подтверждаю или Нет.";
+    }
+
+    if (stage === STAGE.RECORDING_VISIT) {
+      return "Идет запись приема. Когда закончите, скажите: Джарвиз заверши прием.";
+    }
+
+    if (stage === STAGE.AWAITING_SLOT_SELECTION) {
+      return "Сейчас выбор слота. Скажите: Выбери ближайшую дату или Поставь на день и время.";
+    }
+
+    if (stage === STAGE.COMMAND) {
+      if (includesAny(normalized, ["начни", "прием", "приём", "новый"])) {
+        return "Чтобы начать прием, скажите: Джарвиз начни прием.";
+      }
+      if (includesAny(normalized, ["распис", "слот", "ближай", "постав"])) {
+        return "Скажите: Выбери ближайшую дату или Поставь на день и время.";
+      }
+      return "Я на связи. Скажите короткую команду: Джарвиз начни прием, Джарвиз стоп, или Выбери ближайшую дату.";
+    }
+
+    return "Команда не распознана по сценарию.";
   }
 
   function hasStructuredVisitDraft(draft) {
@@ -4147,7 +4458,7 @@ function parseDateFromText(normalizedText) {
           slotLabel: `${asg.startTime || minutesToClock(startMin)} - ${asg.endTime || minutesToClock(endMin)}`,
           specialist: asg.specialist || "Специалист",
           procedure: asg.type || "Прием",
-          status: "busy",
+          status: normalizeText(String(asg.status || "")).includes("выполн") ? "busy" : "free",
           domId: "",
         };
       });
@@ -4301,6 +4612,22 @@ function parseDateFromText(normalizedText) {
   }
 
   async function announceCurrentAvailability() {
+    if (!state.patientHint) {
+      state.patientHint = extractPatientNameFromDom() || state.patientHint || "";
+    }
+
+    if (!state.runtimeSlots.length && !state.scheduleGrid.length) {
+      const scheduleData = await fetchAndApplySandboxSchedule(state.visitDraft || {});
+      if (!scheduleData) {
+        const fromDom = extractSlotsFromPageDom();
+        if (fromDom.length) {
+          state.runtimeSlots = fromDom;
+          state.scheduleGrid = [];
+          queuePersist();
+        }
+      }
+    }
+
     ensureRuntimeSlots();
     renderAll();
 
@@ -4341,6 +4668,30 @@ function parseDateFromText(normalizedText) {
       await speakAndPublish("check_schedule", "Сначала завершите этап формирования расписания", {
         requiredStatus: "SCHEDULING",
       }, {
+        resume: true,
+      });
+      return;
+    }
+
+    if (isSlotConfirmationIntent(normalized)) {
+      if (state.pendingSuggestedSlot) {
+        const placedPending = await placeSlotToDom(state.pendingSuggestedSlot);
+        if (placedPending) {
+          state.pendingSuggestedSlot.status = "busy";
+          state.stage = STAGE.IDLE;
+          state.pendingSlotRequest = null;
+          queuePersist();
+          renderAll();
+          await speakAndPublish("check_schedule", "Подтверждено. Слот поставлен.", {
+            slot: state.pendingSuggestedSlot,
+          }, {
+            resume: true,
+          });
+          return;
+        }
+      }
+
+      await speakAndPublish("check_schedule", "Нет ожидающего слота для подтверждения. Назовите новую команду записи.", {}, {
         resume: true,
       });
       return;
@@ -4392,10 +4743,15 @@ function parseDateFromText(normalizedText) {
       await speakAndPublish(
         "check_schedule",
         `Нашел свободный слот: ${freeSlot.dateLabel}, ${freeSlot.slotLabel}.` +
-          (freeSlot.domId ? " Откройте расписание и подтвердите запись вручную." : " Слот найден по API песочницы."),
+          (freeSlot.domId ? " Скажите: подтверждаю, чтобы поставить." : " Слот найден по API песочницы."),
         { slot: freeSlot, preference },
         { resume: true }
       );
+
+      if (freeSlot.domId) {
+        state.pendingSuggestedSlot = freeSlot;
+        queuePersist();
+      }
       return;
     }
 
@@ -4437,7 +4793,53 @@ function parseDateFromText(normalizedText) {
       return;
     }
 
+    if (seemsLikeClosestFreeSlotIntent(normalized)) {
+      const preference = parseFreeSlotPreference(normalized);
+      let freeSlot = findAnyFreeSlot(preference);
+      if (!freeSlot) {
+        freeSlot = await findAnyFreeSlotViaApi(preference);
+      }
+
+      if (!freeSlot) {
+        await speakAndPublish("check_schedule", "Ближайший свободный слот не найден. Назовите день и время вручную.", {
+          preference,
+        }, {
+          resume: true,
+        });
+        return;
+      }
+
+      const placedAny = await placeSlotToDom(freeSlot);
+      if (placedAny) {
+        freeSlot.status = "busy";
+        state.stage = STAGE.IDLE;
+        state.pendingSuggestedSlot = null;
+        state.pendingSlotRequest = null;
+        queuePersist();
+        renderAll();
+        await speakAndPublish(
+          "check_schedule",
+          `Готово. Выбрал ближайший свободный слот: ${freeSlot.dateLabel}, ${freeSlot.slotLabel}.`,
+          { slot: freeSlot, preference },
+          { resume: true }
+        );
+        return;
+      }
+
+      await speakAndPublish(
+        "check_schedule",
+        `Нашел ближайший свободный слот: ${freeSlot.dateLabel}, ${freeSlot.slotLabel}. Скажите: подтверждаю, чтобы поставить.` +
+          (freeSlot.domId ? "" : " Если это слот из API песочницы, откройте расписание и подтвердите запись вручную."),
+        { slot: freeSlot, preference },
+        { resume: true }
+      );
+      state.pendingSuggestedSlot = freeSlot;
+      queuePersist();
+      return;
+    }
+
     const parsedRequest = parseRequestedSlotParts(normalized);
+    const hasAnySlotHints = hasSlotRequestData(normalized) || isPlaceSlotCommand(normalized);
     const nowTs = Date.now();
     let previousRequest = state.pendingSlotRequest;
 
@@ -4464,6 +4866,9 @@ function parseDateFromText(normalizedText) {
         prompt = "День понял. Теперь скажите время, например: в 10 утра";
       } else if (!hasDate && hasTime) {
         prompt = "Время понял. Теперь скажите день, например: в воскресенье";
+      } else if (!hasAnySlotHints) {
+        // Random phrase/noise in slot stage — do not spam strict date-time prompt.
+        return;
       }
 
       state.pendingSlotRequest = {
@@ -4599,9 +5004,42 @@ function parseDateFromText(normalizedText) {
       state.patientHint = inferredPatient;
     }
 
-    const aiDraft = await runLocalAiProcessing(state.visitLines, inferredPatient);
-    const fallbackDraft = buildVisitDraft(state.visitLines, inferredPatient);
+    let linesForProcessing = state.visitLines.slice();
+    if (RECORD_AS_DICTAPHONE) {
+      const fullText = await transcribeFullVisitAudio();
+      if (fullText) {
+        linesForProcessing = [fullText];
+      }
+    }
+
+    const aiDraft = await runLocalAiProcessing(linesForProcessing, inferredPatient);
+    const fallbackDraft = buildVisitDraft(linesForProcessing, inferredPatient);
     const draft = aiDraft || fallbackDraft;
+
+    const hasDraftData = hasStructuredVisitDraft(draft);
+    if (!hasDraftData) {
+      const autoHint = {
+        patient: inferredPatient || "",
+        complaints: "",
+        anamnesis: "",
+        objective: "",
+        diagnosis: "",
+        treatment: "",
+        diary: "",
+        manualRequired: true,
+        createdAt: new Date().toISOString(),
+      };
+      state.visitDraft = autoHint;
+      state.stage = STAGE.AWAITING_VISIT_CONFIRMATION;
+      queuePersist();
+      renderAll();
+      await speakAndPublish("fill_form", "Черновик пустой. Заполните поля вручную или загрузите шаблон, затем подтвердите.", {
+        draft: autoHint,
+        source: "fallback_empty",
+      }, { resume: true });
+      return;
+    }
+
     if (!draft.patient && inferredPatient) {
       draft.patient = inferredPatient;
     }
@@ -4632,6 +5070,11 @@ function parseDateFromText(normalizedText) {
     }
 
     await speakAndPublish("fill_form", "Данные внесены. Формирую расписание...", { verification }, { resume: false });
+
+    // Ensure sandbox has an opened patient before schedule generation.
+    if (!state.patientHint) {
+      state.patientHint = extractPatientNameFromDom() || state.patientHint || "";
+    }
 
     const scheduleData = await fetchAndApplySandboxSchedule(state.visitDraft);
     if (!scheduleData) {
@@ -4669,6 +5112,34 @@ function parseDateFromText(normalizedText) {
     }
 
     if (isYesCommand(normalized)) {
+      const hasRealDraft = state.visitDraft && hasStructuredVisitDraft(state.visitDraft);
+      if (!hasRealDraft) {
+        await speakAndPublish("fill_form", "Черновик еще пустой. Сначала заполните поля вручную в расширении или загрузите шаблон, затем подтвердите.", {
+          requireManualDraft: true,
+        }, {
+          resume: true,
+        });
+        return;
+      }
+
+      // If user already applied manual draft through popup, accept and move on
+      // without forcing DOM injection in current page.
+      if (state.visitDraft && state.visitDraft.manualRequired !== true) {
+        const hasManualFields = [
+          "complaints",
+          "anamnesis",
+          "objective",
+          "diagnosis",
+          "treatment",
+          "diary",
+        ].some((key) => String(state.visitDraft[key] || "").trim().length > 0);
+
+        if (hasManualFields) {
+          await confirmVisitAndAdvance({ total: 0, okCount: 0, manual: true });
+          return;
+        }
+      }
+
       const injectResult = await injectVisitDraftToDom(state.visitDraft);
       const verification = injectResult.verification;
 
@@ -4776,6 +5247,7 @@ function parseDateFromText(normalizedText) {
     state.patientHint = "";
     state.pendingSiteCheck = null;
     state.transcript = [];
+    state.fullVisitAudioChunks = [];
 
     queuePersist();
     renderAll();
@@ -4831,6 +5303,18 @@ function parseDateFromText(normalizedText) {
 
     if (state.stage === STAGE.AWAITING_SLOT_SELECTION && isOpenVisitCommand(normalized)) {
       await beginVisit(text);
+      return;
+    }
+
+    if (state.stage === STAGE.AWAITING_SLOT_SELECTION && includesAny(normalized, ["начни", "начнем", "начни прием", "начать прием"])) {
+      await beginVisit(`джарвиз ${text}`);
+      return;
+    }
+
+    if (state.stage === STAGE.AWAITING_SLOT_SELECTION && includesAny(normalized, ["ночн", "ночной", "вечерн"])) {
+      await speakAndPublish("check_schedule", "Скажите конкретно: поставь на день и время, например: Джарвиз поставь на понедельник в 9 утра.", {}, {
+        resume: true,
+      });
       return;
     }
 
@@ -4891,8 +5375,41 @@ function parseDateFromText(normalizedText) {
     }
 
     if (state.stage === STAGE.AWAITING_SLOT_SELECTION) {
+      if (isSlotConfirmationIntent(normalized)) {
+        await applyRequestedSlot(normalized);
+        return;
+      }
+
+      if (includesAny(normalized, ["первого пациента", "первый пациент", "открой первого пациента"])) {
+        const opened = await openFirstPatientFromDom();
+        if (!opened) {
+          await speakAndPublish("open_site", "Не нашел карточку первого пациента на этой вкладке.", {}, { resume: true });
+        }
+        return;
+      }
+
+      if (isOpenDamumedCommand(normalized)) {
+        await openSiteCommand("damumed");
+        return;
+      }
+
+      if (isOpenSandboxCommand(normalized) || includesAny(normalized, ["открой песочницу", "песочницу"])) {
+        await openSiteCommand("sandbox");
+        return;
+      }
+
+      if (includesAny(normalized, ["начнем", "начнем прием", "начинаем"])) {
+        await beginVisit(`джарвиз ${text}`);
+        return;
+      }
+
       if (isAnalyzeScheduleCommand(normalized)) {
         await announceCurrentAvailability();
+        return;
+      }
+
+      if (hasSlotRequestData(normalized)) {
+        await applyRequestedSlot(normalized);
         return;
       }
 
@@ -4996,7 +5513,21 @@ function parseDateFromText(normalizedText) {
     }
 
     if (containsWakeWord(normalized)) {
-      await speakAndPublish("none", "Команда не распознана по сценарию", {
+      if (state.stage === STAGE.AWAITING_SLOT_SELECTION && includesAny(normalized, ["первого пациента", "первый пациент"])) {
+        const opened = await openFirstPatientFromDom();
+        if (!opened) {
+          await speakAndPublish("open_site", "Не нашел карточку первого пациента на этой вкладке.", {}, { resume: true });
+        }
+        return;
+      }
+
+      let fallbackSpeech = buildContextualFallbackSpeech(text, state.stage);
+      const aiHint = await runLocalAssistantFallback(text, state.stage);
+      if (aiHint) {
+        fallbackSpeech = aiHint;
+      }
+
+      await speakAndPublish("none", fallbackSpeech, {
         rawText: text,
       }, {
         resume: true,
@@ -5011,6 +5542,7 @@ function parseDateFromText(normalizedText) {
     }
 
     const normalized = normalizeText(normalizedText);
+    const normalizedWake = normalizeWakeVariants(normalized);
     // Whisper sometimes hallucinates YouTube/podcast filler when audio is silent or noisy.
     // Drop these aggressively so they don't pollute medical fields.
     const globalNoise = [
@@ -5049,6 +5581,15 @@ function parseDateFromText(normalizedText) {
     if (includesAny(normalized, globalNoise)) {
       console.log("[JARVIS noise-filter] dropped:", normalizedText.slice(0, 80));
       return;
+    }
+
+    if (
+      state.stage === STAGE.COMMAND &&
+      (includesAny(normalizedWake, ["чарвис", "дарвис", "джорвис", "чарльз", "джарвис", "джарвиз"]) ||
+        includesAny(normalized, ["начни прием", "начни", "открой песочницу", "открой дамумед"]))
+    ) {
+      // Ensure command-mode wakeword variants are not dropped by strict wake routing.
+      // They are handled in processWithoutWakeWord command branch.
     }
 
     // Drop ultra-short isolated tokens like "э", "а", "м", "ну" — pure filler.
@@ -5143,6 +5684,17 @@ function parseDateFromText(normalizedText) {
 
     const analysis = analyzeRequestedSite(target);
     await applySiteAnalysis(analysis, true);
+
+    if (!state.listening) {
+      try {
+        const data = await storageGet([STORAGE_KEYS.autoResumeListening]);
+        const autoResume = data[STORAGE_KEYS.autoResumeListening] !== false;
+        if (autoResume) {
+          await startListening();
+        }
+      } catch (_error) {
+      }
+    }
   }
 
   function setupRuntimeMessageHandler() {
@@ -5204,8 +5756,26 @@ function parseDateFromText(normalizedText) {
           awaitingVoiceConfirm: state.awaitingVoiceConfirm,
           holdToTalk: state.holdToTalk,
           holdingToTalk: state.holdingToTalk,
+          ttsBlocked: state.ttsBlocked,
+          ttsEnabled: state.ttsEnabled,
         });
         return;
+      }
+
+      if (message && message.type === "assistant:setTtsEnabled") {
+        void (async () => {
+          try {
+            const enabled = Boolean(message.payload && message.payload.enabled);
+            state.ttsEnabled = enabled;
+            await storageSet({ [STORAGE_KEYS.ttsEnabled]: enabled });
+            queuePersist();
+            renderAll();
+            sendResponse({ ok: true, ttsEnabled: state.ttsEnabled });
+          } catch (error) {
+            sendResponse({ ok: false, error: String(error || "set_tts_enabled_failed") });
+          }
+        })();
+        return true;
       }
 
       if (message && message.type === "assistant:setHoldToTalk") {
@@ -5258,6 +5828,7 @@ function parseDateFromText(normalizedText) {
         state.visitLines = [];
         state.visitDraft = null;
         state.scheduleGrid = [];
+        state.fullVisitAudioChunks = [];
         renderAll();
         queuePersist();
         pageToast("Прием начат — диктуйте");
@@ -5301,12 +5872,15 @@ function parseDateFromText(normalizedText) {
               diagnosis: String(raw.diagnosis || "").trim(),
               treatment: String(raw.treatment || "").trim(),
               diary: String(raw.diary || "").trim(),
+              manualRequired: false,
               createdAt: new Date().toISOString(),
             };
 
             state.visitDraft = draft;
             state.awaitingVoiceConfirm = null;
-            const result = await injectVisitDraftToDom(draft);
+            // Do not force immediate DOM inject from popup. Keep manual draft in state
+            // and allow voice confirmation to proceed in a stable path.
+            const result = { success: true, verification: { total: 0, okCount: 0, manual: true } };
             sendResponse({
               ok: true,
               applied: result.success,
@@ -5376,6 +5950,12 @@ function parseDateFromText(normalizedText) {
     renderAll();
     setupRuntimeMessageHandler();
     await handlePendingSiteCheck();
+
+    // If we are already on target site after reload, recover stage without forcing "open site" prompt.
+    const currentAnalysis = analyzeCurrentPage();
+    if (currentAnalysis && currentAnalysis.site !== "other") {
+      await applySiteAnalysis(currentAnalysis, false);
+    }
 
     if (state.stage === STAGE.AWAITING_LOGIN) {
       startLoginWatcher();

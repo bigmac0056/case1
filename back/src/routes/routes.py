@@ -1039,6 +1039,32 @@ def _heuristic_jarvis_process(patient_hint: str, transcript_lines: list[str]) ->
 
 @router.post("/api/jarvis/process-visit", response_model=JarvisProcessVisitResponse)
 async def jarvis_process_visit(request: JarvisProcessVisitRequest):
+    if (request.intent or "").strip().lower() == "assistant_fallback":
+        raw_text = (request.raw_text or "").strip()
+        stage = (request.stage or "").strip()
+
+        if stage == "awaiting_visit_confirmation":
+            guidance = "Сейчас этап подтверждения. Скажите: Да подтверждаю или Нет."
+        elif stage == "recording_visit":
+            guidance = "Запись приема идет. Когда закончите, скажите: Джарвиз заверши прием."
+        elif stage == "awaiting_slot_selection":
+            guidance = "Сейчас этап выбора слота. Скажите: выбери ближайшую дату или поставь на день и время."
+        else:
+            guidance = "Скажите короткую команду: Джарвиз начни прием, Джарвиз стоп, или выбери ближайшую дату."
+
+        if raw_text:
+            guidance = f"Я услышал: {raw_text}. {guidance}"
+
+        return JarvisProcessVisitResponse(
+            patient="",
+            complaints="",
+            anamnesis="",
+            objective="",
+            diagnosis="",
+            treatment=guidance,
+            diary="",
+        )
+
     patient_hint = (request.patient_hint or "").strip()
     lines = [str(line).strip() for line in request.transcript_lines if str(line).strip()]
 
