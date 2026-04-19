@@ -28,7 +28,16 @@
 
       <section class="card">
         <div class="section-label">Голосовой ввод</div>
+        <div class="action-grid">
+          <button id="btnOpenDamumedVoice" class="btn-action">🌐 Damumed + голос</button>
+          <button id="btnOpenSandboxVoice" class="btn-action">🌐 Песочница + голос</button>
+        </div>
         <button id="btnTalk" class="btn-primary btn-huge">🎙️ Говорить</button>
+        <div class="toggle-row">
+          <label class="toggle-label" for="holdToTalkToggle">Push-to-talk (зажми и говори)</label>
+          <input id="holdToTalkToggle" type="checkbox" />
+        </div>
+        <button id="btnPushToTalk" class="btn-action hidden">🎤 Зажми и говори</button>
 
         <div id="stageBar" class="stage-bar">
           <span id="stageLabel">Ожидание</span>
@@ -45,6 +54,10 @@
 
       <section class="card">
         <div class="section-label">Ручная проверка перед подтверждением</div>
+        <div class="field-row">
+          <label class="field-label">Пациент (ФИО)</label>
+          <textarea id="fieldPatient" rows="2" placeholder="Введите или проверьте ФИО пациента"></textarea>
+        </div>
         <div class="field-row">
           <label class="field-label">Жалобы</label>
           <textarea id="fieldComplaints" rows="2" placeholder="Введите или проверьте жалобы"></textarea>
@@ -71,6 +84,43 @@
         </div>
         <button id="btnApplyManual" class="btn-primary" style="width: 100%">Внести в форму вручную</button>
         <div id="manualStatus" class="fill-status"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-label">Файлы и шаблоны (MVP)</div>
+        <div class="field-row">
+          <label class="field-label">Загрузка PDF/текста</label>
+          <input id="fileMedical" type="file" accept=".pdf,.txt,.md,.json,.doc,.docx" />
+        </div>
+        <div class="field-row">
+          <label class="field-label">Шаблон врача (JSON/TXT)</label>
+          <input id="fileTemplate" type="file" accept=".json,.txt,.md" />
+        </div>
+        <button id="btnApplyFiles" class="btn-action">📎 Интегрировать в черновик</button>
+        <div id="fileStatus" class="fill-status"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-label">Статус услуги</div>
+        <div class="action-grid">
+          <button id="btnCompleteByVoice" class="btn-action">✅ Выполнено (по голосу)</button>
+          <button id="btnCompleteNow" class="btn-action">🕒 Выполнено сейчас</button>
+        </div>
+        <textarea id="fieldServiceDiary" rows="2" placeholder="Короткий дневник по выполненной услуге"></textarea>
+        <div id="serviceStatus" class="fill-status"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-label">Демо-сценарий (железный)</div>
+        <ol class="demo-steps">
+          <li>Нажать <strong>Песочница + голос</strong></li>
+          <li>Сказать: <code>Джарвиз начни прием</code></li>
+          <li>Коротко продиктовать жалобы/анамнез/объективно</li>
+          <li>Сказать: <code>Джарвиз стоп</code></li>
+          <li>Проверить поля и нажать <strong>Внести в форму вручную</strong></li>
+          <li>Сказать: <code>Джарвиз запиши в любое свободное время</code></li>
+          <li>Нажать <strong>Выполнено сейчас</strong></li>
+        </ol>
       </section>
 
       <section class="card">

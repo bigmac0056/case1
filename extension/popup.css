@@ -117,6 +117,23 @@ body {
   gap: 7px;
 }
 
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f8fbfd;
+}
+
+.toggle-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
 /* Buttons */
 .btn-primary {
   background: linear-gradient(180deg, #3b9aaa 0%, #2f7f8c 100%);
@@ -170,6 +187,17 @@ input[type="url"] {
   font: inherit;
   font-size: 12px;
   color: var(--text);
+}
+
+input[type="file"] {
+  width: 100%;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: #f8fbfd;
 }
 input[type="text"]:focus,
 input[type="url"]:focus {
@@ -372,4 +400,26 @@ textarea:focus {
   font-size: 11px;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.demo-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.demo-steps li {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.demo-steps code {
+  font-family: Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  background: #f0f4f8;
+  border-radius: 6px;
+  padding: 1px 5px;
 }

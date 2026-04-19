@@ -13,6 +13,10 @@ const statusBar = document.getElementById("statusBar");
 const statusText = document.getElementById("statusText");
 
 const btnTalk = document.getElementById("btnTalk");
+const btnOpenDamumedVoice = document.getElementById("btnOpenDamumedVoice");
+const btnOpenSandboxVoice = document.getElementById("btnOpenSandboxVoice");
+const holdToTalkToggle = document.getElementById("holdToTalkToggle");
+const btnPushToTalk = document.getElementById("btnPushToTalk");
 const btnStartRecording = document.getElementById("btnStartRecording");
 const btnFinishRecording = document.getElementById("btnFinishRecording");
 const btnForceConfirm = document.getElementById("btnForceConfirm");
@@ -21,8 +25,17 @@ const visitLinesCount = document.getElementById("visitLinesCount");
 const lastTranscriptEl = document.getElementById("lastTranscript");
 const btnApplyManual = document.getElementById("btnApplyManual");
 const manualStatus = document.getElementById("manualStatus");
+const fileMedical = document.getElementById("fileMedical");
+const fileTemplate = document.getElementById("fileTemplate");
+const btnApplyFiles = document.getElementById("btnApplyFiles");
+const fileStatus = document.getElementById("fileStatus");
+const btnCompleteByVoice = document.getElementById("btnCompleteByVoice");
+const btnCompleteNow = document.getElementById("btnCompleteNow");
+const fieldServiceDiary = document.getElementById("fieldServiceDiary");
+const serviceStatus = document.getElementById("serviceStatus");
 
 const fieldComplaints = document.getElementById("fieldComplaints");
+const fieldPatient = document.getElementById("fieldPatient");
 const fieldAnamnesis = document.getElementById("fieldAnamnesis");
 const fieldObjective = document.getElementById("fieldObjective");
 const fieldDiagnosis = document.getElementById("fieldDiagnosis");
@@ -55,6 +68,20 @@ function normalizeUrl(value) {
   }
 }
 
+function toOriginUrl(value) {
+  const normalized = normalizeUrl(value);
+  if (!normalized) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    return parsed.origin;
+  } catch (_error) {
+    return "";
+  }
+}
+
 function setStatus(message, isError) {
   if (!statusBar || !statusText) {
     return;
@@ -79,6 +106,150 @@ function setManualStatus(message, isError) {
   }
   manualStatus.textContent = message;
   manualStatus.className = isError ? "fill-status error" : "fill-status";
+}
+
+function setFileStatus(message, isError) {
+  if (!fileStatus) {
+    return;
+  }
+  fileStatus.textContent = message;
+  fileStatus.className = isError ? "fill-status error" : "fill-status";
+}
+
+function setServiceStatus(message, isError) {
+  if (!serviceStatus) {
+    return;
+  }
+  serviceStatus.textContent = message;
+  serviceStatus.className = isError ? "fill-status error" : "fill-status";
+}
+
+function mergeDraft(base, extra) {
+  const baseObj = base && typeof base === "object" ? base : {};
+  const extraObj = extra && typeof extra === "object" ? extra : {};
+  const out = { ...baseObj };
+  ["patient", "complaints", "anamnesis", "objective", "diagnosis", "treatment", "diary"].forEach((key) => {
+    const value = String(extraObj[key] || "").trim();
+    if (value) {
+      const prev = String(out[key] || "").trim();
+      out[key] = prev ? `${prev} ${value}`.trim() : value;
+    }
+  });
+  return out;
+}
+
+function extractStructuredDraftFromText(text) {
+  const source = String(text || "").trim();
+  if (!source) {
+    return {};
+  }
+
+  const normalized = source.replace(/\r/g, "\n");
+  const fields = {
+    patient: ["пациент", "фио", "patient"],
+    complaints: ["жалобы", "complaints"],
+    anamnesis: ["анамнез", "анамнеза", "history"],
+    objective: ["объектив", "осмотр", "objective"],
+    diagnosis: ["диагноз", "мкб", "diagnosis"],
+    treatment: ["назнач", "рекоменд", "лечение", "treatment", "plan"],
+    diary: ["дневник", "динамик", "diary"],
+  };
+
+  const out = {};
+  const lines = normalized.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+
+  for (const line of lines) {
+    for (const [key, hints] of Object.entries(fields)) {
+      if (hints.some((hint) => line.toLowerCase().includes(hint))) {
+        const value = line
+          .replace(/^([^:]{1,30}):/i, "")
+          .replace(/^[-•]\s*/, "")
+          .trim();
+        if (value && value.length > 2) {
+          const prev = String(out[key] || "").trim();
+          out[key] = prev ? `${prev} ${value}`.trim() : value;
+        }
+      }
+    }
+  }
+
+  if (!Object.keys(out).length) {
+    out.diary = source.slice(0, 900);
+  }
+  return out;
+}
+
+function parseTemplateContent(content) {
+  const raw = String(content || "").trim();
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return parsed;
+    }
+  } catch (_error) {
+  }
+
+  return extractStructuredDraftFromText(raw);
+}
+
+async function readFileText(file, maxChars) {
+  if (!file) {
+    return "";
+  }
+
+  const text = await file.text();
+  const value = String(text || "").trim();
+  if (!value) {
+    return "";
+  }
+  return value.slice(0, Math.max(200, maxChars));
+}
+
+async function applyFileAndTemplateToDraft() {
+  const medical = fileMedical && fileMedical.files && fileMedical.files[0] ? fileMedical.files[0] : null;
+  const template = fileTemplate && fileTemplate.files && fileTemplate.files[0] ? fileTemplate.files[0] : null;
+
+  if (!medical && !template) {
+    setFileStatus("Выберите хотя бы один файл", true);
+    return;
+  }
+
+  const current = {
+    patient: String(fieldPatient.value || "").trim(),
+    complaints: String(fieldComplaints.value || "").trim(),
+    anamnesis: String(fieldAnamnesis.value || "").trim(),
+    objective: String(fieldObjective.value || "").trim(),
+    diagnosis: String(fieldDiagnosis.value || "").trim(),
+    treatment: String(fieldTreatment.value || "").trim(),
+    diary: String(fieldDiary.value || "").trim(),
+  };
+
+  const [medicalText, templateText] = await Promise.all([
+    readFileText(medical, 3000),
+    readFileText(template, 2400),
+  ]);
+
+  const fromMedical = extractStructuredDraftFromText(medicalText);
+  const fromTemplate = parseTemplateContent(templateText);
+  const merged = mergeDraft(mergeDraft(current, fromTemplate), fromMedical);
+
+  fillManualFieldsFromDraft(merged);
+  const mergedFields = Object.keys(merged).filter((key) => String(merged[key] || "").trim()).length;
+  setFileStatus(`Интегрировано из файлов. Полей с данными: ${mergedFields}`, false);
+}
+
+async function markServiceCompletedNow() {
+  const diary = String((fieldServiceDiary && fieldServiceDiary.value) || "").trim();
+  const response = await sendToContent("assistant:markServiceCompleted", { diary });
+  if (!response || !response.ok) {
+    throw new Error((response && response.error) || "mark_service_failed");
+  }
+  const completedAt = response.completedAt || "";
+  setServiceStatus(completedAt ? `Отмечено выполнено: ${completedAt}` : "Отмечено выполнено", false);
 }
 
 function getStorage(keys) {
@@ -112,11 +283,97 @@ async function sendToContent(type, payload) {
   return chrome.tabs.sendMessage(tab.id, { type, payload: payload || {} });
 }
 
+async function sendToAssistant(type, payload) {
+  const tab = await getActiveTab();
+  if (!tab || !tab.id || !tab.url) {
+    throw new Error("Нет активной вкладки");
+  }
+
+  const url = String(tab.url || "");
+  const isHttpPage = /^https?:\/\//i.test(url);
+
+  if (isHttpPage) {
+    return sendToContent(type, payload);
+  }
+
+  if (type === "assistant:toggleListening" || type === "assistant:pushToTalk") {
+    return { ok: false, error: "Откройте Damumed или sandbox и нажмите Говорить" };
+  }
+
+  const storage = await getStorage([KEY_DAMUMED, KEY_SANDBOX]);
+  const lowerType = String(type || "").toLowerCase();
+  const targetUrl = lowerType.includes("sandbox")
+    ? toOriginUrl(storage[KEY_SANDBOX]) || DEFAULT_SANDBOX
+    : toOriginUrl(storage[KEY_DAMUMED]) || DEFAULT_DAMUMED;
+
+  if (!targetUrl) {
+    return { ok: false, error: "URL не настроен" };
+  }
+
+  const nav = await chrome.runtime.sendMessage({ type: "assistant:navigateTab", url: targetUrl });
+  if (!nav || !nav.ok) {
+    return { ok: false, error: (nav && nav.error) || "navigation_failed" };
+  }
+
+  return { ok: true, redirected: true, targetUrl };
+}
+
 async function openTab(url) {
   if (!chrome.tabs || !chrome.tabs.create) {
     return;
   }
   await chrome.tabs.create({ url });
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function focusTabByOrigin(origin, timeoutMs = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const tabs = await chrome.tabs.query({});
+    const found = tabs.find((tab) => tab && typeof tab.url === "string" && tab.url.startsWith(origin));
+    if (found && found.id) {
+      await chrome.tabs.update(found.id, { active: true });
+      if (found.windowId) {
+        await chrome.windows.update(found.windowId, { focused: true });
+      }
+      return found;
+    }
+    await wait(250);
+  }
+  return null;
+}
+
+async function openSiteAndActivateVoice(target) {
+  const storage = await getStorage([KEY_DAMUMED, KEY_SANDBOX]);
+  const targetUrl = target === "sandbox"
+    ? toOriginUrl(storage[KEY_SANDBOX]) || DEFAULT_SANDBOX
+    : toOriginUrl(storage[KEY_DAMUMED]) || DEFAULT_DAMUMED;
+
+  if (!targetUrl) {
+    throw new Error("URL не настроен");
+  }
+
+  const nav = await chrome.runtime.sendMessage({ type: "assistant:navigateTab", url: targetUrl });
+  if (!nav || !nav.ok) {
+    throw new Error((nav && nav.error) || "navigation_failed");
+  }
+
+  const origin = new URL(targetUrl).origin;
+  const tab = await focusTabByOrigin(origin, 7000);
+  if (!tab || !tab.id) {
+    throw new Error("Не удалось активировать вкладку сайта");
+  }
+
+  await wait(500);
+  const voice = await chrome.tabs.sendMessage(tab.id, { type: "assistant:toggleListening", payload: {} });
+  if (!voice || !voice.ok) {
+    throw new Error((voice && voice.error) || "voice_toggle_failed");
+  }
+
+  return { targetUrl };
 }
 
 async function checkBackend() {
@@ -135,6 +392,7 @@ async function checkBackend() {
 
 function fillManualFieldsFromDraft(draft) {
   const source = draft && typeof draft === "object" ? draft : {};
+  fieldPatient.value = String(source.patient || "");
   fieldComplaints.value = String(source.complaints || "");
   fieldAnamnesis.value = String(source.anamnesis || "");
   fieldObjective.value = String(source.objective || "");
@@ -145,6 +403,21 @@ function fillManualFieldsFromDraft(draft) {
 
 async function refreshContentState() {
   try {
+    const tab = await getActiveTab();
+    const url = String((tab && tab.url) || "");
+    const isHttpPage = /^https?:\/\//i.test(url);
+
+    if (!isHttpPage) {
+      damumedWarn.classList.remove("hidden");
+      voiceDot.className = "dot dot-off";
+      voiceLabel.textContent = "откройте сайт";
+      if (lastTranscriptEl) {
+        lastTranscriptEl.textContent = "Откройте Damumed или sandbox, затем включайте голосовой ввод";
+        lastTranscriptEl.classList.remove("hidden");
+      }
+      return;
+    }
+
     const [analysis, envelope] = await Promise.all([
       sendToContent("assistant:analyzePage", {}),
       sendToContent("assistant:getStateEnvelope", {}),
@@ -158,10 +431,25 @@ async function refreshContentState() {
       const backendLoopActive = Boolean(envelope.backendLoopActive);
       const sttBusy = Boolean(envelope.sttBusy);
       const localAiEnabled = Boolean(envelope.localAiEnabled);
+      const holdToTalk = Boolean(envelope.holdToTalk);
+      const holdingToTalk = Boolean(envelope.holdingToTalk);
       voiceDot.className = `dot ${listening ? "dot-on" : "dot-off"}`;
       voiceLabel.textContent = listening
         ? (backendLoopActive ? "микрофон вкл (backend stt)" : "микрофон вкл")
         : "микрофон выкл";
+
+      if (holdToTalkToggle) {
+        holdToTalkToggle.checked = holdToTalk;
+      }
+
+      if (btnPushToTalk) {
+        btnPushToTalk.classList.toggle("hidden", !holdToTalk);
+        btnPushToTalk.textContent = holdingToTalk ? "🛑 Отпустите для паузы" : "🎤 Зажми и говори";
+      }
+
+      if (btnTalk) {
+        btnTalk.classList.toggle("hidden", holdToTalk);
+      }
 
       if (statusText && localAiEnabled) {
         const endpoint = String(envelope.localAiEndpoint || "");
@@ -248,11 +536,21 @@ async function refreshContentState() {
 
 async function loadUrls() {
   const data = await getStorage([KEY_DAMUMED, KEY_SANDBOX, KEY_LOCAL_AI]);
+  const damumedOrigin = toOriginUrl(data[KEY_DAMUMED]) || DEFAULT_DAMUMED;
+  const sandboxOrigin = toOriginUrl(data[KEY_SANDBOX]) || DEFAULT_SANDBOX;
+
+  if (toOriginUrl(data[KEY_DAMUMED]) !== data[KEY_DAMUMED] || toOriginUrl(data[KEY_SANDBOX]) !== data[KEY_SANDBOX]) {
+    await setStorage({
+      [KEY_DAMUMED]: damumedOrigin,
+      [KEY_SANDBOX]: sandboxOrigin,
+    });
+  }
+
   if (damumedInput) {
-    damumedInput.value = normalizeUrl(data[KEY_DAMUMED]) || DEFAULT_DAMUMED;
+    damumedInput.value = damumedOrigin;
   }
   if (sandboxInput) {
-    sandboxInput.value = normalizeUrl(data[KEY_SANDBOX]) || DEFAULT_SANDBOX;
+    sandboxInput.value = sandboxOrigin;
   }
 
   const currentAi = normalizeUrl(data[KEY_LOCAL_AI]);
@@ -262,8 +560,8 @@ async function loadUrls() {
 }
 
 async function saveUrls() {
-  const damumed = normalizeUrl(damumedInput ? damumedInput.value : "");
-  const sandbox = normalizeUrl(sandboxInput ? sandboxInput.value : "");
+  const damumed = toOriginUrl(damumedInput ? damumedInput.value : "");
+  const sandbox = toOriginUrl(sandboxInput ? sandboxInput.value : "");
 
   if (!damumed || !sandbox) {
     setPopupStatus("Проверь URL: нужны корректные http/https адреса");
@@ -281,7 +579,7 @@ async function saveUrls() {
 async function onTalkClick() {
   try {
     logActivity("Переключение микрофона...");
-    const response = await sendToContent("assistant:toggleListening", {});
+    const response = await sendToAssistant("assistant:toggleListening", {});
     if (!response || !response.ok) {
       throw new Error((response && response.error) || "toggle_failed");
     }
@@ -307,6 +605,7 @@ async function onTalkClick() {
 async function onApplyManualClick() {
   try {
     const payload = {
+      patient: String(fieldPatient.value || "").trim(),
       complaints: String(fieldComplaints.value || "").trim(),
       anamnesis: String(fieldAnamnesis.value || "").trim(),
       objective: String(fieldObjective.value || "").trim(),
@@ -331,9 +630,71 @@ btnTalk?.addEventListener("click", () => {
   void onTalkClick();
 });
 
+holdToTalkToggle?.addEventListener("change", async () => {
+  try {
+    const enabled = Boolean(holdToTalkToggle.checked);
+    const response = await sendToAssistant("assistant:setHoldToTalk", { enabled });
+    if (!response || !response.ok) {
+      throw new Error((response && response.error) || "set_hold_to_talk_failed");
+    }
+
+    if (!enabled) {
+      await sendToAssistant("assistant:pushToTalk", { active: false });
+    }
+
+    await refreshContentState();
+    setStatus(enabled ? "Push-to-talk включен" : "Push-to-talk выключен", false);
+  } catch (error) {
+    setStatus(`Ошибка режима PTT: ${String(error && error.message ? error.message : error)}`, true);
+    await refreshContentState();
+  }
+});
+
+function bindPushToTalkButton() {
+  if (!btnPushToTalk) {
+    return;
+  }
+
+  const press = async () => {
+    try {
+      await sendToAssistant("assistant:pushToTalk", { active: true });
+      await refreshContentState();
+    } catch (_error) {
+    }
+  };
+
+  const release = async () => {
+    try {
+      await sendToAssistant("assistant:pushToTalk", { active: false });
+      await refreshContentState();
+    } catch (_error) {
+    }
+  };
+
+  btnPushToTalk.addEventListener("mousedown", () => { void press(); });
+  btnPushToTalk.addEventListener("mouseup", () => { void release(); });
+  btnPushToTalk.addEventListener("mouseleave", () => { void release(); });
+  btnPushToTalk.addEventListener("touchstart", (event) => {
+    event.preventDefault();
+    void press();
+  }, { passive: false });
+  btnPushToTalk.addEventListener("touchend", (event) => {
+    event.preventDefault();
+    void release();
+  }, { passive: false });
+  btnPushToTalk.addEventListener("touchcancel", (event) => {
+    event.preventDefault();
+    void release();
+  }, { passive: false });
+}
+
 btnStartRecording?.addEventListener("click", async () => {
   try {
-    const response = await sendToContent("assistant:startRecording", {});
+    const response = await sendToAssistant("assistant:startRecording", {});
+    if (response && response.redirected) {
+      setStatus("Открыл сайт. Перейдите на вкладку и нажмите Начать прием ещё раз.", false);
+      return;
+    }
     if (!response || !response.ok) throw new Error("Не удалось начать прием");
     setStatus("Прием начат — диктуйте показания", false);
     await refreshContentState();
@@ -347,7 +708,11 @@ btnFinishRecording?.addEventListener("click", async () => {
     btnFinishRecording.disabled = true;
     btnFinishRecording.textContent = "⏳ Обрабатываю...";
     setStatus("Завершаю прием — отправляю в AI...", false);
-    const response = await sendToContent("assistant:finishRecording", {});
+    const response = await sendToAssistant("assistant:finishRecording", {});
+    if (response && response.redirected) {
+      setStatus("Открыл сайт. Перейдите на вкладку и завершите прием на странице.", false);
+      return;
+    }
     if (!response || !response.ok) throw new Error(response?.error || "Не удалось завершить прием");
     setStatus("Прием завершён — проверьте поля ниже", false);
     await refreshContentState();
@@ -380,6 +745,49 @@ btnApplyManual?.addEventListener("click", () => {
   void onApplyManualClick();
 });
 
+btnApplyFiles?.addEventListener("click", () => {
+  void (async () => {
+    try {
+      btnApplyFiles.disabled = true;
+      await applyFileAndTemplateToDraft();
+    } catch (error) {
+      setFileStatus(`Ошибка интеграции: ${String(error && error.message ? error.message : error)}`, true);
+    } finally {
+      btnApplyFiles.disabled = false;
+    }
+  })();
+});
+
+btnCompleteNow?.addEventListener("click", () => {
+  void (async () => {
+    try {
+      btnCompleteNow.disabled = true;
+      await markServiceCompletedNow();
+      await refreshContentState();
+    } catch (error) {
+      setServiceStatus(`Ошибка статуса: ${String(error && error.message ? error.message : error)}`, true);
+    } finally {
+      btnCompleteNow.disabled = false;
+    }
+  })();
+});
+
+btnCompleteByVoice?.addEventListener("click", () => {
+  void (async () => {
+    try {
+      const response = await sendToAssistant("assistant:manualCommand", {
+        text: "джарвиз отметь выполнено",
+      });
+      if (!response || !response.ok) {
+        throw new Error((response && response.error) || "manual_voice_command_failed");
+      }
+      setServiceStatus("Команда отправлена: отметка выполнено", false);
+    } catch (error) {
+      setServiceStatus(`Ошибка голосовой команды: ${String(error && error.message ? error.message : error)}`, true);
+    }
+  })();
+});
+
 saveUrlsButton?.addEventListener("click", () => {
   void saveUrls();
 });
@@ -387,14 +795,46 @@ saveUrlsButton?.addEventListener("click", () => {
 openDamumedButton?.addEventListener("click", () => {
   void (async () => {
     const data = await getStorage([KEY_DAMUMED]);
-    await openTab(normalizeUrl(data[KEY_DAMUMED]) || DEFAULT_DAMUMED);
+    await openTab(toOriginUrl(data[KEY_DAMUMED]) || DEFAULT_DAMUMED);
   })();
 });
 
 openSandboxButton?.addEventListener("click", () => {
   void (async () => {
     const data = await getStorage([KEY_SANDBOX]);
-    await openTab(normalizeUrl(data[KEY_SANDBOX]) || DEFAULT_SANDBOX);
+    await openTab(toOriginUrl(data[KEY_SANDBOX]) || DEFAULT_SANDBOX);
+  })();
+});
+
+btnOpenDamumedVoice?.addEventListener("click", () => {
+  void (async () => {
+    try {
+      btnOpenDamumedVoice.disabled = true;
+      setStatus("Открываю Damumed и включаю микрофон...", false);
+      await openSiteAndActivateVoice("damumed");
+      setStatus("Damumed открыт, микрофон включен", false);
+      await refreshContentState();
+    } catch (error) {
+      setStatus(`Ошибка запуска: ${String(error && error.message ? error.message : error)}`, true);
+    } finally {
+      btnOpenDamumedVoice.disabled = false;
+    }
+  })();
+});
+
+btnOpenSandboxVoice?.addEventListener("click", () => {
+  void (async () => {
+    try {
+      btnOpenSandboxVoice.disabled = true;
+      setStatus("Открываю песочницу и включаю микрофон...", false);
+      await openSiteAndActivateVoice("sandbox");
+      setStatus("Песочница открыта, микрофон включен", false);
+      await refreshContentState();
+    } catch (error) {
+      setStatus(`Ошибка запуска: ${String(error && error.message ? error.message : error)}`, true);
+    } finally {
+      btnOpenSandboxVoice.disabled = false;
+    }
   })();
 });
 
@@ -422,6 +862,7 @@ void (async () => {
   await checkBackend();
   await refreshContentState();
   logActivity("Popup открыт, backend проверен");
+  bindPushToTalkButton();
 
   window.setInterval(async () => {
     const prevStage = stageLabel ? stageLabel.textContent : "";

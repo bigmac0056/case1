@@ -14,6 +14,7 @@ from src.ai.whisper_client import transcribe_ru
 from src.core.config import settings
 from datetime import datetime, timedelta
 import json
+import re
 import tempfile
 import os
 from collections import defaultdict
@@ -400,6 +401,8 @@ async def transcribe_base64(payload: dict):
     if not audio_base64:
         return {"text": ""}
 
+    prompt = str(payload.get("prompt") or "").strip()
+
     mime_type = str(payload.get("mime_type") or "audio/webm").strip().lower()
     suffix = ".webm"
     if "wav" in mime_type:
@@ -417,7 +420,7 @@ async def transcribe_base64(payload: dict):
         tmp_path = tmp.name
 
     try:
-        text = await asyncio.to_thread(_run_whisper, tmp_path)
+        text = await asyncio.to_thread(_run_whisper, tmp_path, prompt)
         return {"text": text}
     except Exception:
         return {"text": ""}
@@ -532,8 +535,8 @@ VOICE_NORMALIZATION_PROMPT = """Ты модуль нормализации го�
    НЕ путай с open_reception — open_reception только когда открывают ПРИЁМ ПАЦИЕНТА."""
 
 
-def _run_whisper(tmp_path: str) -> str:
-    return transcribe_ru(tmp_path)
+def _run_whisper(tmp_path: str, prompt: str = "") -> str:
+    return transcribe_ru(tmp_path, prompt)
 
 
 def _extract_json_from_llm(text: str) -> dict | None:
@@ -613,6 +616,9 @@ def _extract_patient_query(transcript: str) -> str:
 
 def _heuristic_voice_command(transcript: str) -> VoiceCommandResponse:
     t = transcript.lower()
+    # Strip wake word so it doesn't pollute keyword matching.
+    for wake in ("джарвис", "джарвиз", "jarvis", "жарвис"):
+        t = t.replace(wake, " ")
 
     # Navigation section keywords — Russian AND English (Whisper may output either)
     NAV_SECTIONS = (
@@ -858,6 +864,101 @@ async def ai_ping():
         )
 
 
+_WAKE_PHRASES = (
+    "джарвис", "джарвиз", "jarvis", "жарвис",
+)
+
+# Phrases that should be dropped entirely from medical sections (commands / chatter).
+_NOISE_PHRASES = (
+    "продолжение следует",
+    "субтитры",
+    "subtitles",
+    "спасибо за просмотр",
+    "спасибо за внимание",
+    "подписывайтесь",
+    "ставьте лайк",
+    "музыка играет",
+    "фоновая музыка",
+    "до новых встреч",
+    "amara.org",
+    "начни прием", "начать прием", "открой прием",
+    "заверши прием", "закончи прием",
+    "сохрани", "подтверди", "подтверждаю", "отмени",
+    "открой дамумед", "открой песочницу",
+)
+
+_SECTION_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("complaints",  ("жалоб", "жалуется", "жалоба", "болит", "беспокоит")),
+    ("anamnesis",   ("анамнез", "история заболеван", "со слов", "болеет", "перенес", "хроническ")),
+    ("objective",   ("объектив", "осмотр", "температур", "давлен", "ад ", "пульс", "чсс", "чдд", "состояние", "кожн", "слизист", "аускульт", "перкут", "пальпац")),
+    ("diagnosis",   ("диагноз", "мкб", "код мкб", "j", "i10", "k29")),
+    ("treatment",   ("назнач", "рекоменд", "лечение", "препарат", "терап", "режим", "диет", "процедур", "таблет", "мг ", "капс", "инъекц")),
+    ("diary",       ("дневник", "динамик", "состояние сегодня", "наблюдение")),
+)
+
+
+def _strip_wake_and_section_prefix(line: str) -> str:
+    """Drop leading wake-word and any leading section header like 'Жалобы:' / 'Анамнез -'."""
+    cleaned = line.strip()
+    lowered = cleaned.lower()
+
+    # Strip wake word at start
+    for wake in _WAKE_PHRASES:
+        if lowered.startswith(wake):
+            cleaned = cleaned[len(wake):].lstrip(" ,.:;-—")
+            lowered = cleaned.lower()
+            break
+
+    # Strip leading "Жалобы:", "Анамнез -", etc.
+    m = re.match(
+        r"^(жалоб[аы]?|анамнез|объектив(?:но)?|диагноз|назначени[яе]|рекомендаци[ия]|лечение|дневник)\s*[:\-—]\s*",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        cleaned = cleaned[m.end():].strip()
+
+    return cleaned
+
+
+_HEADER_PREFIX_RE = re.compile(
+    r"^\s*(жалоб[аы]?|анамнез|объектив(?:но|ный\s+осмотр|ный\s+статус)?|диагноз|"
+    r"назначени[яе]|рекомендаци[ия]|лечение|дневник)\b\s*[:\-—]?",
+    flags=re.IGNORECASE,
+)
+
+_HEADER_TO_SECTION = {
+    "жалоб":      "complaints",
+    "анамнез":    "anamnesis",
+    "объектив":   "objective",
+    "диагноз":    "diagnosis",
+    "назначен":   "treatment",
+    "рекоменд":   "treatment",
+    "лечение":    "treatment",
+    "дневник":    "diary",
+}
+
+
+def _detect_section_by_header(lowered: str) -> str | None:
+    """Match an explicit section header at the start of the line."""
+    m = _HEADER_PREFIX_RE.match(lowered)
+    if not m:
+        return None
+    head = m.group(1).lower()
+    for prefix, section in _HEADER_TO_SECTION.items():
+        if head.startswith(prefix):
+            return section
+    return None
+
+
+def _detect_section_by_keyword(lowered: str) -> str | None:
+    """Fallback: scan the whole line for section keywords (less reliable)."""
+    for key, tokens in _SECTION_KEYWORDS:
+        if any(token in lowered for token in tokens):
+            return key
+    return None
+
+
 def _heuristic_jarvis_process(patient_hint: str, transcript_lines: list[str]) -> JarvisProcessVisitResponse:
     sections: dict[str, list[str]] = {
         "complaints": [],
@@ -868,28 +969,59 @@ def _heuristic_jarvis_process(patient_hint: str, transcript_lines: list[str]) ->
         "diary": [],
     }
 
-    active = "complaints"
+    # Don't lock in a default — wait for the first real section signal.
+    active: str | None = None
+    pending_unassigned: list[str] = []
 
     for raw_line in transcript_lines:
         line = str(raw_line or "").strip()
         if not line:
             continue
 
-        lowered = line.lower()
-        if any(token in lowered for token in ("жалоб", "жалоба")):
-            active = "complaints"
-        elif any(token in lowered for token in ("анамнез", "история", "со слов", "болеет")):
-            active = "anamnesis"
-        elif any(token in lowered for token in ("объектив", "осмотр", "температур", "давлен")):
-            active = "objective"
-        elif any(token in lowered for token in ("диагноз", "мкб", "код")):
-            active = "diagnosis"
-        elif any(token in lowered for token in ("назнач", "рекоменд", "лечение", "препарат", "терап")):
-            active = "treatment"
-        elif any(token in lowered for token in ("дневник", "динамик", "состояние сегодня")):
-            active = "diary"
+        cleaned = _strip_wake_and_section_prefix(line)
+        if not cleaned:
+            continue
 
-        sections[active].append(line)
+        lowered_full = line.lower()
+        # Drop noise/command phrases entirely
+        if any(noise in lowered_full for noise in _NOISE_PHRASES):
+            continue
+
+        # Strong signal: an explicit header at the start of the line ALWAYS switches section.
+        header_section = _detect_section_by_header(lowered_full)
+        if header_section:
+            active = header_section
+            # If the line was JUST a section header (nothing left after strip), skip storing.
+            if cleaned and not re.fullmatch(
+                r"(жалоб[аы]?|анамнез|объектив(?:но|ный\s+осмотр|ный\s+статус)?|диагноз|назначени[яе]|рекомендаци[ия]|лечение|дневник)[\s:.,;\-—]*",
+                cleaned,
+                flags=re.IGNORECASE,
+            ):
+                sections[active].append(cleaned)
+            # Flush any unassigned text into the first active section
+            if pending_unassigned:
+                sections[active] = pending_unassigned + sections[active]
+                pending_unassigned = []
+            continue
+
+        # No active section yet — try a softer keyword scan to bootstrap.
+        if active is None:
+            keyword_section = _detect_section_by_keyword(lowered_full)
+            if keyword_section:
+                active = keyword_section
+                sections[active].append(cleaned)
+                if pending_unassigned:
+                    sections[active] = pending_unassigned + sections[active]
+                    pending_unassigned = []
+            else:
+                pending_unassigned.append(cleaned)
+        else:
+            # Already in a section — DO NOT switch on weak embedded keywords; doctor's flow continues.
+            sections[active].append(cleaned)
+
+    # If we never detected a section, dump everything into complaints as last resort.
+    if active is None and pending_unassigned:
+        sections["complaints"] = pending_unassigned
 
     def join(key: str) -> str:
         return " ".join(sections[key]).strip()

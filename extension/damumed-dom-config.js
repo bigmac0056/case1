@@ -86,38 +86,78 @@
           "[data-testid='complaints-field']",
           "textarea[name*='complaint']",
           "textarea[id*='complaint']",
-          "textarea[placeholder*='Жалоб']"
+          "textarea[placeholder*='Жалоб']",
+          "textarea#fieldInput[data-testid='complaints-field']"
         ],
         anamnesis: [
           "[data-testid='anamnesis-field']",
           "textarea[name*='anamnes']",
           "textarea[id*='anamnes']",
-          "textarea[placeholder*='Анамнез']"
+          "textarea[placeholder*='Анамнез']",
+          "textarea#fieldInput[data-testid='anamnesis-field']"
         ],
         objective: [
           "[data-testid='objective-field']",
           "textarea[name*='objective']",
           "textarea[id*='objective']",
-          "textarea[placeholder*='Объектив']"
+          "textarea[placeholder*='Объектив']",
+          "textarea#fieldInput[data-testid='objective-field']"
         ],
         diagnosis: [
           "[data-testid='diagnosis-field']",
           "textarea[name*='diagnosis']",
           "textarea[id*='diagnosis']",
-          "textarea[placeholder*='Диагноз']"
+          "textarea[placeholder*='Диагноз']",
+          "textarea#fieldInput[data-testid='diagnosis-field']"
         ],
         treatment: [
           "[data-testid='treatment-field']",
           "textarea[name*='treatment']",
           "textarea[id*='treatment']",
-          "textarea[placeholder*='Назнач']"
+          "textarea[placeholder*='Назнач']",
+          "textarea#fieldInput[data-testid='treatment-field']"
         ],
         diary: [
+          "[data-testid='diary-field']",
           "textarea[name*='diary']",
           "textarea[id*='diary']",
-          "textarea[placeholder*='Дневник']"
+          "textarea[placeholder*='Дневник']",
+          "textarea#fieldInput[data-testid='diary-field']"
         ]
       },
+      // Sandbox uses ONE textarea + tab buttons that swap its data-testid.
+      // Click the tab first, wait a frame, then write to the (now-active) textarea.
+      tabSelectors: {
+        complaints: [
+          "[data-testid='complaints-tab']",
+          ".field-tab[data-field='complaints']"
+        ],
+        anamnesis: [
+          "[data-testid='anamnesis-tab']",
+          ".field-tab[data-field='anamnesis']"
+        ],
+        objective: [
+          "[data-testid='objective-tab']",
+          ".field-tab[data-field='objectiveStatus']"
+        ],
+        diagnosis: [
+          "[data-testid='diagnosis-tab']",
+          ".field-tab[data-field='diagnosis']"
+        ],
+        treatment: [
+          "[data-testid='treatment-tab']",
+          ".field-tab[data-field='recommendations']"
+        ],
+        diary: [
+          "[data-testid='diary-tab']",
+          ".field-tab[data-field='diary']"
+        ]
+      },
+      // Fallback: the single textarea used by the sandbox when no field-specific testid is set.
+      sharedFieldSelectors: [
+        "textarea[data-testid='record-field-input']",
+        "textarea#fieldInput"
+      ],
       saveSelectors: [
         "button",
         "a",

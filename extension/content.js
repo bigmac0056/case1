@@ -42,6 +42,7 @@
     damumedUrl: "jarvis_damumed_url",
     sandboxUrl: "jarvis_sandbox_url",
     localAiUrl: "jarvis_local_ai_url",
+    holdToTalk: "jarvis_hold_to_talk",
     session: "jarvis_assistant_session",
   };
 
@@ -77,9 +78,11 @@
   const VOICE_AUTHOR = "voice";
   const JARVIS_AUTHOR = "jarvis";
   const PREFER_BACKEND_STT = true;
-  const BACKEND_STT_CHUNK_MS = 3200;
+  const BACKEND_STT_CHUNK_MS = 4000;
   const BACKEND_STT_MIN_TEXT_CHARS = 2;
   const SLOT_REQUEST_TTL_MS = 15000;
+  const AUTO_SCHEDULE_AFTER_VISIT = false;
+  const DEMO_SAFE_MODE = true;
   const VISIT_FIELD_TITLES = {
     complaints: "жалобы",
     anamnesis: "анамнез",
@@ -115,6 +118,8 @@
     lastHeardText: "",
     lastHeardAt: 0,
     panelCollapsed: false,
+    holdToTalk: false,
+    holdingToTalk: false,
     config: {
       damumedUrl: DEFAULTS.damumedUrl,
       sandboxUrl: DEFAULTS.sandboxUrl,
@@ -158,6 +163,7 @@
 
   let persistTimer = null;
   let loginWatchTimer = null;
+  let beepAudioCtx = null;
   const voiceQueue = [];
   let voiceQueueBusy = false;
   const domSlotElements = new Map();
@@ -312,11 +318,26 @@
           "textarea[placeholder*='Назнач']",
         ],
         diary: [
+          "[data-testid='diary-field']",
           "textarea[name*='diary']",
           "textarea[id*='diary']",
           "textarea[placeholder*='Дневник']",
         ],
       },
+      // Sandbox: one shared textarea + tab buttons that swap its data-testid.
+      // The injection routine clicks the tab first, then writes to the (now-active) textarea.
+      tabSelectors: {
+        complaints: ["[data-testid='complaints-tab']", ".field-tab[data-field='complaints']"],
+        anamnesis: ["[data-testid='anamnesis-tab']", ".field-tab[data-field='anamnesis']"],
+        objective: ["[data-testid='objective-tab']", ".field-tab[data-field='objectiveStatus']"],
+        diagnosis: ["[data-testid='diagnosis-tab']", ".field-tab[data-field='diagnosis']"],
+        treatment: ["[data-testid='treatment-tab']", ".field-tab[data-field='recommendations']"],
+        diary: ["[data-testid='diary-tab']", ".field-tab[data-field='diary']"],
+      },
+      sharedFieldSelectors: [
+        "textarea[data-testid='record-field-input']",
+        "textarea#fieldInput",
+      ],
       saveSelectors: [
         "button",
         "a",
@@ -453,6 +474,36 @@
             DOM_CONFIG_DEFAULTS.visit.fieldSelectors.diary
           ),
         },
+        tabSelectors: {
+          complaints: asArray(
+            external.visit && external.visit.tabSelectors && external.visit.tabSelectors.complaints,
+            DOM_CONFIG_DEFAULTS.visit.tabSelectors.complaints
+          ),
+          anamnesis: asArray(
+            external.visit && external.visit.tabSelectors && external.visit.tabSelectors.anamnesis,
+            DOM_CONFIG_DEFAULTS.visit.tabSelectors.anamnesis
+          ),
+          objective: asArray(
+            external.visit && external.visit.tabSelectors && external.visit.tabSelectors.objective,
+            DOM_CONFIG_DEFAULTS.visit.tabSelectors.objective
+          ),
+          diagnosis: asArray(
+            external.visit && external.visit.tabSelectors && external.visit.tabSelectors.diagnosis,
+            DOM_CONFIG_DEFAULTS.visit.tabSelectors.diagnosis
+          ),
+          treatment: asArray(
+            external.visit && external.visit.tabSelectors && external.visit.tabSelectors.treatment,
+            DOM_CONFIG_DEFAULTS.visit.tabSelectors.treatment
+          ),
+          diary: asArray(
+            external.visit && external.visit.tabSelectors && external.visit.tabSelectors.diary,
+            DOM_CONFIG_DEFAULTS.visit.tabSelectors.diary
+          ),
+        },
+        sharedFieldSelectors: asArray(
+          external.visit && external.visit.sharedFieldSelectors,
+          DOM_CONFIG_DEFAULTS.visit.sharedFieldSelectors
+        ),
         saveSelectors: asArray(
           external.visit && external.visit.saveSelectors,
           DOM_CONFIG_DEFAULTS.visit.saveSelectors
@@ -547,10 +598,16 @@
     const canonicalByAlias = {
       джарвис: "джарвиз",
       джарвич: "джарвиз",
+      джарвикс: "джарвиз",
+      джарвиc: "джарвиз",
       джарвизз: "джарвиз",
       джарвисс: "джарвиз",
       джарвик: "джарвиз",
       джарвив: "джарвиз",
+      джарльз: "джарвиз",
+      чарльз: "джарвиз",
+      чарлис: "джарвиз",
+      чарли: "джарвиз",
       джарви: "джарвиз",
       джарв: "джарвиз",
       ярвис: "джарвиз",
@@ -558,6 +615,10 @@
       jarviss: "jarvis",
       jarwis: "jarvis",
       jarwiz: "jarvis",
+      jervis: "jarvis",
+      jarves: "jarvis",
+      charles: "jarvis",
+      charls: "jarvis",
       jarv: "jarvis",
     };
 
@@ -578,6 +639,37 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  function playAcknowledgeBeep() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) {
+        return;
+      }
+
+      if (!beepAudioCtx) {
+        beepAudioCtx = new AudioCtx();
+      }
+
+      const now = beepAudioCtx.currentTime;
+      const osc = beepAudioCtx.createOscillator();
+      const gain = beepAudioCtx.createGain();
+
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(1046, now);
+
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(0.08, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.11);
+
+      osc.connect(gain);
+      gain.connect(beepAudioCtx.destination);
+
+      osc.start(now);
+      osc.stop(now + 0.12);
+    } catch (_error) {
+    }
   }
 
   function trimArray(array, maxLength) {
@@ -617,8 +709,22 @@
       "джарвиз заверши прием", "джарвис заверши прием",
       "джарвиз завершай", "джарвис завершай",
     ],
-    confirmYes: ["джарвиз да подтверждаю", "да подтверждаю", "да"],
-    confirmNo: ["джарвиз нет", "нет", "не подтверждаю"],
+    confirmYes: [
+      "джарвиз да подтверждаю",
+      "джарвис да подтверждаю",
+      "джарвиз подтверждаю",
+      "джарвис подтверждаю",
+      "да подтверждаю",
+      "подтверждаю",
+    ],
+    confirmNo: [
+      "джарвиз нет",
+      "джарвис нет",
+      "джарвиз не подтверждаю",
+      "джарвис не подтверждаю",
+      "не подтверждаю",
+      "отмена",
+    ],
     analyzePage: [
       "джарвиз проверь страницу",
       "джарвиз анализ страницы",
@@ -634,9 +740,16 @@
     placeSlot: [
       "джарвиз поставь на", "джарвиз поставь в", "джарвиз запиши на", "джарвиз перезапиши на",
       "джарвис поставь на", "джарвис поставь в", "джарвис запиши на", "джарвис перезапиши на",
-      "поставь на", "запиши на",
     ],
     resetFlow: ["джарвиз сбрось прием", "джарвиз сброс сценария", "джарвиз очисти прием"],
+    markCompleted: [
+      "джарвиз отметь выполнено",
+      "джарвис отметь выполнено",
+      "джарвиз услуга выполнена",
+      "джарвис услуга выполнена",
+      "джарвиз статус выполнено",
+      "джарвис статус выполнено",
+    ],
   };
 
   function getVoiceConfig() {
@@ -681,6 +794,74 @@
     const canonical = normalizeWakeVariants(normalized);
     const enriched = `${normalized} ${canonical} ${normalized.replace(/джарвис/g, "джарвиз")}`;
     return includesAny(enriched, samples);
+  }
+
+  function containsOnlyWakeWords(normalized) {
+    const cleaned = normalizeWakeVariants(normalized)
+      .replace(/[\.,!?;:]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) {
+      return false;
+    }
+
+    const tokens = cleaned.split(" ").filter(Boolean);
+    if (!tokens.length || tokens.length > 4) {
+      return false;
+    }
+
+    const fillers = new Set(["пожалуйста", "слушай", "слушайся"]);
+    const wakeTokens = new Set([
+      "джарвиз",
+      "джарвис",
+      "джарвич",
+      "джарви",
+      "джарв",
+      "джарльз",
+      "чарльз",
+      "jarvis",
+      "charles",
+    ]);
+
+    return tokens.every((token) => wakeTokens.has(token) || fillers.has(token));
+  }
+
+  function commandRequiresWakeWord(normalized, stage) {
+    if (!DEMO_SAFE_MODE) {
+      return false;
+    }
+
+    if (!normalized) {
+      return false;
+    }
+
+    const nonStrictStages = new Set([
+      STAGE.RECORDING_VISIT,
+      STAGE.AWAITING_VISIT_CONFIRMATION,
+      STAGE.AWAITING_SCHEDULE_CONFIRMATION,
+    ]);
+
+    if (nonStrictStages.has(stage)) {
+      return false;
+    }
+
+    if (containsOnlyWakeWords(normalized)) {
+      return false;
+    }
+
+    const sensitive =
+      isOpenDamumedCommand(normalized) ||
+      isOpenSandboxCommand(normalized) ||
+      isOpenVisitCommand(normalized) ||
+      isFinishVisitCommand(normalized) ||
+      isAnalyzePageCommand(normalized) ||
+      isAnalyzeScheduleCommand(normalized) ||
+      isPlaceSlotCommand(normalized) ||
+      isAnyFreeSlotCommand(normalized) ||
+      hasSlotRequestData(normalized) ||
+      isResetFlowCommand(normalized);
+
+    return sensitive;
   }
 
   function toResponseStatusByStage(stage) {
@@ -1035,6 +1216,19 @@
     }
   }
 
+  function toOriginUrl(url) {
+    const normalized = normalizeConfiguredUrl(url);
+    if (!normalized) {
+      return "";
+    }
+
+    try {
+      return new URL(normalized).origin;
+    } catch (_error) {
+      return "";
+    }
+  }
+
   function urlsMatch(currentUrl, configuredUrl) {
     const normalized = normalizeConfiguredUrl(configuredUrl);
     if (!normalized) {
@@ -1154,14 +1348,17 @@
       STORAGE_KEYS.damumedUrl,
       STORAGE_KEYS.sandboxUrl,
       STORAGE_KEYS.localAiUrl,
+      STORAGE_KEYS.holdToTalk,
       STORAGE_KEYS.session,
     ]);
 
     state.config.damumedUrl = normalizeConfiguredUrl(data[STORAGE_KEYS.damumedUrl]) || DEFAULTS.damumedUrl;
+    state.config.damumedUrl = toOriginUrl(state.config.damumedUrl) || DEFAULTS.damumedUrl;
     state.config.sandboxUrl =
-      normalizeConfiguredUrl(data[STORAGE_KEYS.sandboxUrl]) || DEFAULTS.sandboxUrl;
+      toOriginUrl(normalizeConfiguredUrl(data[STORAGE_KEYS.sandboxUrl]) || DEFAULTS.sandboxUrl) || DEFAULTS.sandboxUrl;
     state.config.localAiUrl =
       normalizeConfiguredUrl(data[STORAGE_KEYS.localAiUrl]) || DEFAULTS.localAiUrl;
+    state.holdToTalk = Boolean(data[STORAGE_KEYS.holdToTalk]);
 
     const saved = data[STORAGE_KEYS.session];
     if (saved && typeof saved === "object") {
@@ -1260,8 +1457,8 @@
       return;
     }
 
-    const damumedUrl = normalizeConfiguredUrl(refs.damumedInput.value);
-    const sandboxUrl = normalizeConfiguredUrl(refs.sandboxInput.value);
+    const damumedUrl = toOriginUrl(refs.damumedInput.value);
+    const sandboxUrl = toOriginUrl(refs.sandboxInput.value);
     const localAiRaw = String(refs.localAiInput.value || "").trim();
     const localAiUrl = localAiRaw ? normalizeConfiguredUrl(localAiRaw) : "";
 
@@ -1353,13 +1550,14 @@
             return;
           }
 
-          const response = await bridge.request("/api/transcribe-base64", {
-            method: "POST",
-            body: {
-              audio_base64: base64,
-              mime_type: blob.type || "audio/webm",
-            },
-          });
+      const response = await bridge.request("/api/transcribe-base64", {
+        method: "POST",
+        body: {
+          audio_base64: base64,
+          mime_type: blob.type || "audio/webm",
+          prompt: "джарвис дамумед прием расписание подтверждаю жалобы анамнез объективно диагноз назначения дневник",
+        },
+      });
 
           if (!response || !response.ok) {
             done("");
@@ -1714,12 +1912,22 @@
       return true;
     }
 
-    return tokens.some((token) =>
+    if (tokens.some((token) =>
       token.startsWith("джарл") || token.startsWith("жарв") || token.startsWith("jarl")
+    )) {
+      return true;
+    }
+
+    return tokens.some((token) =>
+      token.startsWith("чарл") || token === "charles" || token === "charls"
     );
   }
 
   function isWakeOnlyCommand(normalized) {
+    if (containsOnlyWakeWords(normalized)) {
+      return true;
+    }
+
     const canonical = normalizeWakeVariants(normalized);
     if (!canonical) {
       return false;
@@ -1762,9 +1970,16 @@
         return true;
       }
 
+      if (isAnyFreeSlotCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await applyRequestedSlot(normalized);
+        return true;
+      }
+
       if (
         isPlaceSlotCommand(normalized) ||
-        parseRequestedSlot(normalized) ||
+        hasSlotRequestData(normalized) ||
+        isAnyFreeSlotCommand(normalized) ||
         isYesCommand(normalized) ||
         isNoCommand(normalized)
       ) {
@@ -1774,6 +1989,27 @@
       }
 
       return false;
+    }
+
+    if (state.stage === STAGE.COMMAND) {
+      if (
+        isAnyFreeSlotCommand(normalized) ||
+        isPlaceSlotCommand(normalized) ||
+        hasSlotRequestData(normalized)
+      ) {
+        pushTranscript(VOICE_AUTHOR, text);
+        state.stage = STAGE.AWAITING_SLOT_SELECTION;
+        queuePersist();
+        renderAll();
+        await applyRequestedSlot(normalized);
+        return true;
+      }
+
+      if (isMarkCompletedCommand(normalized)) {
+        pushTranscript(VOICE_AUTHOR, text);
+        await markLatestServiceCompleted("", "voice_no_wake");
+        return true;
+      }
     }
 
     return false;
@@ -1818,18 +2054,91 @@
         "поставь на",
         "поставь в",
         "запиши на",
+        "запиши в",
+        "запиши",
+        "записать",
+        "записаться",
+        "запишите",
+        "записывай",
         "перезапиши на",
         "посади на",
         "посадить на",
         "посадит на",
         "спасать на",
         "поставь",
+        "любое свободное",
+        "в свободное время",
+        "на ближайшее время",
+        "ближайшее свободное",
       ])
     );
   }
 
+  function isAnyFreeSlotCommand(normalized) {
+    return includesAny(normalized, [
+      "запиши в любое свободное",
+      "запиши в свободное",
+      "запиши на ближайшее свободное",
+      "в любое свободное время",
+      "в свободное время",
+      "на любое свободное",
+      "на ближайшее время",
+      "в ближайшее свободное",
+      "любой свободный слот",
+      "первое свободное",
+    ]);
+  }
+
+  function parseFreeSlotPreference(normalized) {
+    const date = parseDateFromText(normalized) || parseRelativeDateFromText(normalized);
+
+    let timeFrom = null;
+    let timeTo = null;
+    let timeLabel = "";
+
+    if (includesAny(normalized, ["утр", "утром"])) {
+      timeFrom = 8 * 60;
+      timeTo = 12 * 60;
+      timeLabel = "утром";
+    } else if (includesAny(normalized, ["днем", "днём", "дня"])) {
+      timeFrom = 12 * 60;
+      timeTo = 17 * 60;
+      timeLabel = "днем";
+    } else if (includesAny(normalized, ["вечер", "вечером", "вечера"])) {
+      timeFrom = 17 * 60;
+      timeTo = 22 * 60;
+      timeLabel = "вечером";
+    } else if (includesAny(normalized, ["ноч", "ночью"])) {
+      timeFrom = 0;
+      timeTo = 8 * 60;
+      timeLabel = "ночью";
+    }
+
+    return {
+      date: date || null,
+      dateKey: date ? dateToKey(date) : "",
+      dateLabel: date ? dateToLabel(date) : "",
+      timeFrom,
+      timeTo,
+      timeLabel,
+    };
+  }
+
   function isResetFlowCommand(normalized) {
     return matchCommand(normalized, "resetFlow");
+  }
+
+  function isMarkCompletedCommand(normalized) {
+    return (
+      matchCommand(normalized, "markCompleted") ||
+      includesAny(normalized, [
+        "отметь выполнено",
+        "услуга выполнена",
+        "статус выполнено",
+        "поставь выполнено",
+        "mark completed",
+      ])
+    );
   }
 
   function shouldExplicitWakeForVisit(normalized) {
@@ -1916,7 +2225,7 @@
       return;
     }
 
-    state.stage = STAGE.IDLE;
+    state.stage = STAGE.COMMAND;
     state.pendingSiteCheck = target;
     queuePersist();
     renderAll();
@@ -2156,11 +2465,60 @@
     return cards.find((card) => getTextFromNode(card).includes(normalizedHint)) || null;
   }
 
+  function extractPatientNameFromDom() {
+    const cards = locatePatientCards();
+    const prioritized = cards.slice(0, 3);
+
+    for (const card of prioritized) {
+      const text = (card && card.textContent) ? String(card.textContent) : "";
+      if (!text) {
+        continue;
+      }
+
+      const lines = text
+        .split(/\n+/)
+        .map((line) => String(line || "").trim())
+        .filter(Boolean);
+
+      const fromFioLine = lines.find((line) => /фио|пациент|patient/i.test(line));
+      if (fromFioLine) {
+        const cleaned = fromFioLine
+          .replace(/фио\s*[:\-]?/i, "")
+          .replace(/пациент\s*[:\-]?/i, "")
+          .replace(/patient\s*[:\-]?/i, "")
+          .trim();
+        if (cleaned.length >= 5) {
+          return cleaned;
+        }
+      }
+
+      const capsCandidate = lines.find((line) => {
+        const normalized = normalizeText(line);
+        const words = normalized.split(" ").filter(Boolean);
+        return words.length >= 2 && words.length <= 5 && line.length >= 8;
+      });
+      if (capsCandidate) {
+        return capsCandidate.trim();
+      }
+    }
+
+    return "";
+  }
+
 function parseDateFromText(normalizedText) {
     const clean = ` ${normalizedText} `;
+    const cleanFixed = clean
+      .replace(/воскр\S*/g, "воскресенье")
+      .replace(/вс\b/g, "воскресенье")
+      .replace(/пон\S*/g, "понедельник")
+      .replace(/вт\b/g, "вторник")
+      .replace(/ср\b/g, "среда")
+      .replace(/чт\b/g, "четверг")
+      .replace(/пт\b/g, "пятница")
+      .replace(/сб\b/g, "суббота");
     const now = new Date();
 
-    const isoMatch = clean.match(/(20\d{2})[\-\.\/](\d{1,2})[\-\.\/](\d{1,2})/);
+    const isoMatch = cleanFixed.match(/(20\d{2})[\-\.\/](\d{1,2})[\-\.\/](\d{1,2})/);
     if (isoMatch) {
       const year = Number(isoMatch[1]);
       const month = Number(isoMatch[2]) - 1;
@@ -2171,7 +2529,7 @@ function parseDateFromText(normalizedText) {
       }
     }
 
-    const dmMatch = clean.match(/(\d{1,2})[\.\/-](\d{1,2})(?:[\.\/-](\d{2,4}))?/);
+    const dmMatch = cleanFixed.match(/(\d{1,2})[\.\/-](\d{1,2})(?:[\.\/-](\d{2,4}))?/);
     if (dmMatch) {
       const day = Number(dmMatch[1]);
       const month = Number(dmMatch[2]) - 1;
@@ -2183,7 +2541,7 @@ function parseDateFromText(normalizedText) {
       }
     }
 
-    const dayNumberMatch = clean.match(/(?:на|в|к)?\s*(\d{1,2})\s+([а-я]+)/i);
+    const dayNumberMatch = cleanFixed.match(/(?:на|в|к)?\s*(\d{1,2})\s+([а-я]+)/i);
     if (dayNumberMatch) {
       const day = Number(dayNumberMatch[1]);
       const monthWord = normalizeText(dayNumberMatch[2]);
@@ -2200,18 +2558,18 @@ function parseDateFromText(normalizedText) {
       }
     }
 
-    if (clean.includes("сегодня")) {
+    if (cleanFixed.includes("сегодня")) {
       return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
     }
 
-    if (clean.includes("завтра")) {
+    if (cleanFixed.includes("завтра")) {
       const tomorrow = new Date(now);
       tomorrow.setDate(tomorrow.getDate() + 1);
       tomorrow.setHours(0, 0, 0, 0);
       return tomorrow;
     }
 
-    const weekdayIndex = WEEKDAY_WORDS.findIndex((item) => clean.includes(item));
+    const weekdayIndex = WEEKDAY_WORDS.findIndex((item) => cleanFixed.includes(item));
     if (weekdayIndex >= 0) {
       const weekdayTargets = [1, 2, 3, 4, 5, 6, 0];
       const target = weekdayTargets[weekdayIndex];
@@ -2236,7 +2594,7 @@ function parseDateFromText(normalizedText) {
       воскресенье: 0,
     };
 
-    const directWeekday = Object.entries(weekendMap).find(([name]) => clean.includes(name));
+    const directWeekday = Object.entries(weekendMap).find(([name]) => cleanFixed.includes(name));
     if (directWeekday) {
       const target = directWeekday[1];
       const current = now.getDay();
@@ -2290,7 +2648,48 @@ function parseDateFromText(normalizedText) {
   }
 
   function parseTimeFromText(normalizedText) {
-    const hhmm = normalizedText.match(/(\d{1,2})[:\.](\d{2})/);
+    const punctNormalized = normalizedText.replace(/[^a-zа-я0-9:\.\s]/gi, " ");
+    const fixed = punctNormalized
+      .replace(/\bноль\s*ноль\b/g, "00")
+      .replace(/\bв\s*десять\b/g, "10")
+      .replace(/\bдесять\b/g, "10")
+      .replace(/\bдевять\b/g, "9")
+      .replace(/\bвосемь\b/g, "8")
+      .replace(/\bсемь\b/g, "7")
+      .replace(/\bшесть\b/g, "6")
+      .replace(/\bпять\b/g, "5")
+      .replace(/\bчетыре\b/g, "4")
+      .replace(/\bтри\b/g, "3")
+      .replace(/\bдва\b/g, "2")
+      .replace(/\bодин\b/g, "1")
+      .replace(/\bчасов\b/g, "час")
+      .replace(/\bчаса\b/g, "час");
+
+    const hhOnlyMorning = fixed.match(/\b(\d{1,2})\s*(утра|утром)\b/);
+    if (hhOnlyMorning) {
+      const hh = Number(hhOnlyMorning[1]);
+      if (hh >= 1 && hh <= 12) {
+        return { hour: hh === 12 ? 0 : hh, minute: 0 };
+      }
+    }
+
+    const hhOnlyDayEvening = fixed.match(/\b(\d{1,2})\s*(дня|днем|днём|вечера|вечером)\b/);
+    if (hhOnlyDayEvening) {
+      const hh = Number(hhOnlyDayEvening[1]);
+      if (hh >= 0 && hh <= 23) {
+        return { hour: hh < 8 ? hh + 12 : hh, minute: 0 };
+      }
+    }
+
+    const hhOnlyNoon = fixed.match(/\b(\d{1,2})\s*(ноч[ьиью]|ночью)\b/);
+    if (hhOnlyNoon) {
+      const hh = Number(hhOnlyNoon[1]);
+      if (hh >= 0 && hh <= 23) {
+        return { hour: hh <= 5 ? hh : hh - 12, minute: 0 };
+      }
+    }
+
+    const hhmm = fixed.match(/(\d{1,2})[:\.](\d{2})/);
     if (hhmm) {
       const hh = Number(hhmm[1]);
       const mm = Number(hhmm[2]);
@@ -2300,14 +2699,14 @@ function parseDateFromText(normalizedText) {
     }
 
     // "9 утра", "десять утра"
-    const morningMatch = normalizedText.match(/(?:в\s+)?(\d{1,2})\s+утра/);
+    const morningMatch = fixed.match(/(?:в\s+)?(\d{1,2})\s+утра/);
     if (morningMatch) {
       const hh = Number(morningMatch[1]);
       if (hh >= 1 && hh <= 12) return { hour: hh === 12 ? 0 : hh, minute: 0 };
     }
 
     // "2 дня", "3 дня", "2 вечера"
-    const afternoonMatch = normalizedText.match(/(?:в\s+)?(\d{1,2})\s+(?:дня|вечера)/);
+    const afternoonMatch = fixed.match(/(?:в\s+)?(\d{1,2})\s+(?:дня|вечера)/);
     if (afternoonMatch) {
       const hh = Number(afternoonMatch[1]);
       return { hour: hh < 8 ? hh + 12 : hh, minute: 0 };
@@ -2320,10 +2719,10 @@ function parseDateFromText(normalizedText) {
       ["пятнадцат", 15], ["шестнадцат", 16], ["семнадцат", 17],
     ];
     for (const [stem, num] of WORD_HOURS) {
-      if (normalizedText.includes(stem)) return { hour: num, minute: 0 };
+      if (fixed.includes(stem)) return { hour: num, minute: 0 };
     }
 
-    const hourOnly = normalizedText.match(/(?:в|на)?\s*(\d{1,2})\s*(?:час|ч\b)/);
+    const hourOnly = fixed.match(/(?:в|на)?\s*(\d{1,2})\s*(?:час|ч\b)/);
     if (hourOnly) {
       const hh = Number(hourOnly[1]);
       if (hh >= 0 && hh <= 23) {
@@ -2332,7 +2731,7 @@ function parseDateFromText(normalizedText) {
     }
 
     // bare number in working-hours range as last resort
-    const bareNum = normalizedText.match(/\b(7|8|9|10|11|12|13|14|15|16|17|18)\b/);
+    const bareNum = fixed.match(/\b(7|8|9|10|11|12|13|14|15|16|17|18)\b/);
     if (bareNum) {
       return { hour: Number(bareNum[1]), minute: 0 };
     }
@@ -2725,6 +3124,34 @@ function parseDateFromText(normalizedText) {
     };
   }
 
+  function parseRequestedSlotParts(normalizedText) {
+    const directDate = parseDateFromText(normalizedText);
+    const relativeDate = parseRelativeDateFromText(normalizedText);
+    const date = directDate || relativeDate;
+
+    const directTime = parseTimeFromText(normalizedText);
+    const time = inferTimeWithContext(directTime, normalizedText);
+
+    const specialist = parseDoctorFromText(normalizedText);
+
+    return {
+      date: date || null,
+      dateKey: date ? dateToKey(date) : "",
+      dateLabel: date ? dateToLabel(date) : "",
+      startMin: time ? toMinutesFromTime(time) : null,
+      specialist: specialist || "",
+    };
+  }
+
+  function hasSlotRequestData(normalizedText) {
+    const parts = parseRequestedSlotParts(normalizedText);
+    return Boolean(parts.date || typeof parts.startMin === "number" || parts.specialist);
+  }
+
+  function isCompleteSlotRequest(request) {
+    return Boolean(request && request.date && typeof request.startMin === "number");
+  }
+
   function mergeSlotRequest(baseRequest, extraRequest) {
     if (!baseRequest && !extraRequest) {
       return null;
@@ -2739,13 +3166,10 @@ function parseDateFromText(normalizedText) {
     const date = extraRequest.date || baseRequest.date;
     const dateKey = extraRequest.dateKey || baseRequest.dateKey;
     const dateLabel = extraRequest.dateLabel || baseRequest.dateLabel;
-    const startMin =
-      typeof extraRequest.startMin === "number" ? extraRequest.startMin : baseRequest.startMin;
-    const specialist = extraRequest.specialist || baseRequest.specialist;
-
-    if (!date || typeof startMin !== "number") {
-      return null;
-    }
+    const startMin = typeof extraRequest.startMin === "number"
+      ? extraRequest.startMin
+      : (typeof baseRequest.startMin === "number" ? baseRequest.startMin : null);
+    const specialist = extraRequest.specialist || baseRequest.specialist || "";
 
     return {
       date,
@@ -2806,6 +3230,145 @@ function parseDateFromText(normalizedText) {
     return state.runtimeSlots.find((slot) => slot.status === "free") || null;
   }
 
+  function findAnyFreeSlot(preference) {
+    ensureRuntimeSlots();
+
+    const pref = preference && typeof preference === "object" ? preference : null;
+
+    let free = state.runtimeSlots
+      .filter((slot) => slot.status === "free")
+      .filter((slot) => {
+        if (!pref) {
+          return true;
+        }
+
+        if (pref.dateKey && slot.dateKey !== pref.dateKey) {
+          return false;
+        }
+
+        if (typeof pref.timeFrom === "number" && slot.startMin < pref.timeFrom) {
+          return false;
+        }
+
+        if (typeof pref.timeTo === "number" && slot.startMin >= pref.timeTo) {
+          return false;
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        if (a.dateKey === b.dateKey) {
+          return a.startMin - b.startMin;
+        }
+        return a.dateKey < b.dateKey ? -1 : 1;
+      });
+
+    if (!free.length && pref && pref.dateKey) {
+      free = state.runtimeSlots
+        .filter((slot) => slot.status === "free")
+        .filter((slot) => slot.dateKey === pref.dateKey)
+        .sort((a, b) => a.startMin - b.startMin);
+    }
+
+    if (!free.length && pref && (typeof pref.timeFrom === "number" || typeof pref.timeTo === "number")) {
+      free = state.runtimeSlots
+        .filter((slot) => slot.status === "free")
+        .filter((slot) => {
+          if (typeof pref.timeFrom === "number" && slot.startMin < pref.timeFrom) {
+            return false;
+          }
+          if (typeof pref.timeTo === "number" && slot.startMin >= pref.timeTo) {
+            return false;
+          }
+          return true;
+        })
+        .sort((a, b) => {
+          if (a.dateKey === b.dateKey) {
+            return a.startMin - b.startMin;
+          }
+          return a.dateKey < b.dateKey ? -1 : 1;
+        });
+    }
+
+    return free.length ? free[0] : null;
+  }
+
+  async function findAnyFreeSlotViaApi(preference) {
+    const sandboxUrl = state.config.sandboxUrl || DEFAULTS.sandboxUrl;
+    const sandboxApiBase = toApiBaseUrl(sandboxUrl) || toApiBaseUrl(DEFAULTS.sandboxUrl);
+    if (!sandboxApiBase) {
+      return null;
+    }
+
+    const pref = preference && typeof preference === "object" ? preference : null;
+    const baseDate = pref && pref.date ? new Date(pref.date) : new Date();
+    baseDate.setHours(0, 0, 0, 0);
+
+    const horizonDays = 21;
+    for (let i = 0; i < horizonDays; i += 1) {
+      const day = new Date(baseDate);
+      day.setDate(baseDate.getDate() + i);
+      const dateKey = dateToKey(day);
+
+      if (pref && pref.dateKey && dateKey !== pref.dateKey) {
+        continue;
+      }
+
+      try {
+        const response = await fetch(`${sandboxApiBase}/api/slots/day?date=${encodeURIComponent(dateKey)}`);
+        if (!response.ok) {
+          continue;
+        }
+
+        const data = await response.json();
+        const slots = Array.isArray(data && data.slots) ? data.slots : [];
+        const freeSlot = slots
+          .filter((item) => item && item.status === "free" && item.time)
+          .map((item) => {
+            const parts = String(item.time).match(/(\d{1,2}):(\d{2})/);
+            if (!parts) {
+              return null;
+            }
+            const startMin = Number(parts[1]) * 60 + Number(parts[2]);
+            return {
+              date: day,
+              dateKey,
+              dateLabel: dateToLabel(day),
+              startMin,
+              slotLabel: `${String(item.time)} - ${minutesToClock(startMin + 30)}`,
+              specialist: item.specialist || "Специалист",
+              procedure: item.type || "Прием",
+              status: "free",
+              domId: "",
+              id: `api-free-${dateKey}-${startMin}`,
+            };
+          })
+          .filter(Boolean)
+          .filter((slot) => {
+            if (!pref) {
+              return true;
+            }
+            if (typeof pref.timeFrom === "number" && slot.startMin < pref.timeFrom) {
+              return false;
+            }
+            if (typeof pref.timeTo === "number" && slot.startMin >= pref.timeTo) {
+              return false;
+            }
+            return true;
+          })
+          .sort((a, b) => a.startMin - b.startMin)[0];
+
+        if (freeSlot) {
+          return freeSlot;
+        }
+      } catch (_error) {
+        continue;
+      }
+    }
+
+    return null;
+  }
+
   async function placeSlotToDom(slot) {
     if (!slot.domId) {
       return false;
@@ -2856,6 +3419,56 @@ function parseDateFromText(normalizedText) {
         return node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement;
       }) || null
     );
+  }
+
+  // Returns the first visible matching node (for tab buttons, links, etc.).
+  function findFirstVisible(selectors) {
+    const nodes = queryAllBySelectors(selectors);
+    return nodes.find((node) => isVisibleNode(node)) || null;
+  }
+
+  // Sandbox-aware verification: clicks each tab and re-reads the (single) shared
+  // textarea, because reading all 6 selectors at once would only see whichever
+  // tab is currently active.
+  async function verifyVisitDraftAfterInject(entries, sharedSelectors) {
+    const tabConfig = (DOM_CONFIG.visit && DOM_CONFIG.visit.tabSelectors) || {};
+    const checks = [];
+
+    for (const entry of entries) {
+      const expected = String(entry.value || "");
+      let actual = "";
+
+      // Try field-specific selectors first (works for real Damumed where 6 fields exist).
+      let field = findFieldBySelectors(entry.selectors);
+
+      // If we have tab selectors, click the tab so the sandbox swaps its textarea.
+      if (!field || (sharedSelectors && sharedSelectors.length)) {
+        const tabBtn = (tabConfig[entry.key] || []).length
+          ? findFirstVisible(tabConfig[entry.key])
+          : null;
+        if (tabBtn) {
+          clickElementSafe(tabBtn);
+          await wait(60);
+        }
+        field =
+          findFieldBySelectors(entry.selectors) ||
+          (sharedSelectors && sharedSelectors.length ? findFieldBySelectors(sharedSelectors) : null) ||
+          field;
+      }
+
+      if (field) {
+        actual = String(field.value || "");
+      }
+
+      checks.push({
+        key: entry.key,
+        ok: Boolean(field) && valueMatchesExpected(actual, expected),
+      });
+    }
+
+    const okCount = checks.filter((item) => item.ok).length;
+    const missing = checks.filter((item) => !item.ok).map((item) => item.key);
+    return { okCount, total: checks.length, missing };
   }
 
   function findFieldBySemanticHints(hints) {
@@ -3011,41 +3624,84 @@ function parseDateFromText(normalizedText) {
       return { success: false, filled: 0, verification: null };
     }
 
-    const entries = [
-      { key: "complaints", value: draft.complaints, selectors: DOM_CONFIG.visit.fieldSelectors.complaints },
-      { key: "anamnesis", value: draft.anamnesis, selectors: DOM_CONFIG.visit.fieldSelectors.anamnesis },
-      { key: "objective", value: draft.objective, selectors: DOM_CONFIG.visit.fieldSelectors.objective },
-      { key: "diagnosis", value: draft.diagnosis, selectors: DOM_CONFIG.visit.fieldSelectors.diagnosis },
-      { key: "treatment", value: draft.treatment, selectors: DOM_CONFIG.visit.fieldSelectors.treatment },
-      { key: "diary", value: draft.diary, selectors: DOM_CONFIG.visit.fieldSelectors.diary },
+    // Defensive defaults — DOM_CONFIG can be partially loaded if a page reload races us.
+    const visitConfig = (DOM_CONFIG && DOM_CONFIG.visit) || {};
+    const fieldSelectorsCfg = visitConfig.fieldSelectors || {};
+    const tabConfig = visitConfig.tabSelectors || {};
+    const sharedSelectors = visitConfig.sharedFieldSelectors || [];
+
+    const buildEntry = (key, value) => ({
+      key,
+      value,
+      selectors: Array.isArray(fieldSelectorsCfg[key]) ? fieldSelectorsCfg[key] : [],
+      tabSelectors: Array.isArray(tabConfig[key]) ? tabConfig[key] : [],
+    });
+
+    const allEntries = [
+      buildEntry("complaints", draft.complaints),
+      buildEntry("anamnesis", draft.anamnesis),
+      buildEntry("objective", draft.objective),
+      buildEntry("diagnosis", draft.diagnosis),
+      buildEntry("treatment", draft.treatment),
+      buildEntry("diary", draft.diary),
     ];
+
+    // Skip fields with empty/whitespace-only values — no point switching tabs for nothing.
+    const entries = allEntries.filter((entry) => String(entry.value || "").trim().length > 0);
+
+    if (!entries.length) {
+      console.warn("[JARVIS inject] all draft fields empty, nothing to inject");
+      return { success: false, filled: 0, verification: { okCount: 0, total: 0, missing: [] } };
+    }
 
     let filled = 0;
 
-    entries.forEach((entry) => {
-      const input = findFieldBySelectors(entry.selectors) || findFieldBySemanticHints([
-        entry.key,
-        VISIT_FIELD_TITLES[entry.key] || entry.key,
-      ]);
-      if (!input) {
-        return;
-      }
+    // Sequential (not parallel) because the sandbox uses ONE shared textarea per tab.
+    // Clicking the tab swaps which key the textarea represents.
+    for (const entry of entries) {
+      try {
+        // 1. Try to activate the matching tab (no-op on real Damumed if no tab buttons).
+        const tabBtn = entry.tabSelectors.length
+          ? findFirstVisible(entry.tabSelectors)
+          : null;
+        if (tabBtn) {
+          clickElementSafe(tabBtn);
+          // Yield so the host app can swap the textarea's data-testid / mount the new field.
+          await wait(80);
+        }
 
-      const fieldValue = entry.value || "";
-      if (input.isContentEditable) {
-        input.focus();
-        input.textContent = fieldValue;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      } else {
-        applyInputValue(input, fieldValue);
-      }
-      input.setAttribute("data-jarvis-filled", entry.key);
-      filled += 1;
-    });
+        // 2. Find the input: prefer field-specific selectors, then shared (sandbox), then semantic hints.
+        const input =
+          findFieldBySelectors(entry.selectors) ||
+          (sharedSelectors.length ? findFieldBySelectors(sharedSelectors) : null) ||
+          findFieldBySemanticHints([entry.key, VISIT_FIELD_TITLES[entry.key] || entry.key]);
 
-    await wait(130);
-    const verification = verifyVisitDraftInDom(entries);
+        if (!input) {
+          console.warn("[JARVIS inject] no input for", entry.key);
+          continue;
+        }
+
+        const fieldValue = String(entry.value || "");
+        if (input.isContentEditable) {
+          input.focus();
+          input.textContent = fieldValue;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        } else {
+          applyInputValue(input, fieldValue);
+        }
+        input.setAttribute("data-jarvis-filled", entry.key);
+        filled += 1;
+      } catch (error) {
+        console.error("[JARVIS inject] failed for", entry.key, error);
+      }
+    }
+
+    await wait(140);
+
+    // For sandbox-style verification (single textarea per tab) we re-walk the entries,
+    // clicking each tab and reading the shared textarea so the check matches what's stored.
+    const verification = await verifyVisitDraftAfterInject(entries, sharedSelectors);
 
     const saveButton =
       findVisibleNodeByText(DOM_CONFIG.visit.saveSelectors, DOM_CONFIG.visit.saveKeywords) ||
@@ -3239,7 +3895,9 @@ function parseDateFromText(normalizedText) {
     state.runtimeSlots = [];
     state.pendingSuggestedSlot = null;
     state.strictVisitPending = false;
-    state.patientHint = extractPatientHint(rawCommand);
+    const spokenHint = extractPatientHint(rawCommand);
+    const domPatient = extractPatientNameFromDom();
+    state.patientHint = spokenHint || domPatient || "";
     queuePersist();
     renderAll();
 
@@ -3250,7 +3908,22 @@ function parseDateFromText(normalizedText) {
   }
 
   function appendVisitLine(text) {
-    state.visitLines.push(String(text || "").trim());
+    const line = String(text || "").trim();
+    const normalized = normalizeText(line);
+    if (!line || normalized.length < 4) {
+      return;
+    }
+
+    if (
+      normalized === "продолжение следует" ||
+      normalized.includes("subtitles") ||
+      normalized.includes("субтитры") ||
+      normalized.includes("спасибо за просмотр")
+    ) {
+      return;
+    }
+
+    state.visitLines.push(line);
     state.visitLines = trimArray(state.visitLines, 500);
     queuePersist();
   }
@@ -3508,6 +4181,125 @@ function parseDateFromText(normalizedText) {
     }
   }
 
+  async function fetchAssignmentsApi() {
+    const sandboxUrl = state.config.sandboxUrl || DEFAULTS.sandboxUrl;
+    const sandboxApiBase = toApiBaseUrl(sandboxUrl) || toApiBaseUrl(DEFAULTS.sandboxUrl);
+    if (!sandboxApiBase) {
+      return [];
+    }
+
+    try {
+      const response = await fetch(`${sandboxApiBase}/api/assignments`);
+      if (!response.ok) {
+        return [];
+      }
+      const data = await response.json();
+      return Array.isArray(data && data.assignments) ? data.assignments : [];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function assignmentPriority(assignment) {
+    const status = normalizeText(assignment && assignment.status ? assignment.status : "");
+    if (status.includes("заплан")) {
+      return 3;
+    }
+    if (status.includes("в работе") || status.includes("процесс")) {
+      return 2;
+    }
+    if (status.includes("выполн")) {
+      return 0;
+    }
+    return 1;
+  }
+
+  function findLastPendingAssignment(assignments) {
+    const list = Array.isArray(assignments) ? assignments.slice() : [];
+    if (!list.length) {
+      return null;
+    }
+
+    const sorted = list.sort((a, b) => {
+      const pa = assignmentPriority(a);
+      const pb = assignmentPriority(b);
+      if (pa !== pb) {
+        return pb - pa;
+      }
+
+      const da = String(a && a.date ? a.date : "");
+      const db = String(b && b.date ? b.date : "");
+      if (da !== db) {
+        return da > db ? -1 : 1;
+      }
+
+      const ta = String(a && a.startTime ? a.startTime : "");
+      const tb = String(b && b.startTime ? b.startTime : "");
+      return ta > tb ? -1 : ta < tb ? 1 : 0;
+    });
+
+    return sorted[0] || null;
+  }
+
+  async function completeAssignmentApi(assignmentId, diary) {
+    const sandboxUrl = state.config.sandboxUrl || DEFAULTS.sandboxUrl;
+    const sandboxApiBase = toApiBaseUrl(sandboxUrl) || toApiBaseUrl(DEFAULTS.sandboxUrl);
+    if (!sandboxApiBase) {
+      return { ok: false, error: "sandbox_api_not_configured" };
+    }
+
+    try {
+      const response = await fetch(`${sandboxApiBase}/api/assignments/${encodeURIComponent(assignmentId)}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diary: String(diary || "").trim() }),
+      });
+      if (!response.ok) {
+        return { ok: false, error: `http_${response.status}` };
+      }
+      const data = await response.json();
+      return { ok: true, data };
+    } catch (error) {
+      return { ok: false, error: String(error || "complete_assignment_failed") };
+    }
+  }
+
+  async function markLatestServiceCompleted(diary, source) {
+    const assignments = await fetchAssignmentsApi();
+    const target = findLastPendingAssignment(assignments);
+    if (!target || !target.id) {
+      await speakAndPublish("check_schedule", "Нет активных назначений для отметки выполнено.", { source }, {
+        resume: true,
+      });
+      return { ok: false, error: "no_assignment" };
+    }
+
+    const result = await completeAssignmentApi(target.id, diary);
+    if (!result.ok) {
+      await speakAndPublish("check_schedule", "Не удалось поставить статус Выполнено. Проверьте API песочницы.", {
+        source,
+        error: result.error,
+      }, {
+        resume: true,
+      });
+      return { ok: false, error: result.error || "complete_failed" };
+    }
+
+    const assignment = result.data && result.data.assignment ? result.data.assignment : null;
+    const completedAt = assignment && assignment.completedAt ? assignment.completedAt : "";
+    const specialist = assignment && assignment.specialist ? assignment.specialist : "специалиста";
+    const timeLabel = assignment && assignment.startTime ? assignment.startTime : "";
+
+    await speakAndPublish("check_schedule", `Отметил Выполнено: ${specialist}${timeLabel ? `, ${timeLabel}` : ""}.`, {
+      source,
+      assignment,
+    }, {
+      resume: true,
+    });
+
+    return { ok: true, assignment, completedAt };
+  }
+
   async function announceCurrentAvailability() {
     ensureRuntimeSlots();
     renderAll();
@@ -3554,6 +4346,59 @@ function parseDateFromText(normalizedText) {
       return;
     }
 
+    if (isOpenVisitCommand(normalized)) {
+      await beginVisit(normalized);
+      return;
+    }
+
+    if (isFinishVisitCommand(normalized)) {
+      await finishVisit();
+      return;
+    }
+
+    if (isAnyFreeSlotCommand(normalized)) {
+      const preference = parseFreeSlotPreference(normalized);
+      let freeSlot = findAnyFreeSlot(preference);
+      if (!freeSlot) {
+        freeSlot = await findAnyFreeSlotViaApi(preference);
+      }
+    if (!freeSlot) {
+      await speakAndPublish("check_schedule", "Свободных слотов по этому условию не найдено. Назовите день и время вручную.", {
+        preference,
+        runtimeSlots: state.runtimeSlots.length,
+      }, {
+        resume: true,
+      });
+      return;
+    }
+
+      const placedAny = await placeSlotToDom(freeSlot);
+      if (placedAny) {
+        freeSlot.status = "busy";
+        state.stage = STAGE.IDLE;
+        state.pendingSuggestedSlot = null;
+        state.pendingSlotRequest = null;
+        queuePersist();
+        renderAll();
+        await speakAndPublish(
+          "check_schedule",
+          `Готово. Записал на свободное время ${preference.dateLabel ? `на ${preference.dateLabel}` : ""}${preference.timeLabel ? ` ${preference.timeLabel}` : ""}: ${freeSlot.dateLabel}, ${freeSlot.slotLabel}.`,
+          { slot: freeSlot, preference },
+          { resume: true }
+        );
+        return;
+      }
+
+      await speakAndPublish(
+        "check_schedule",
+        `Нашел свободный слот: ${freeSlot.dateLabel}, ${freeSlot.slotLabel}.` +
+          (freeSlot.domId ? " Откройте расписание и подтвердите запись вручную." : " Слот найден по API песочницы."),
+        { slot: freeSlot, preference },
+        { resume: true }
+      );
+      return;
+    }
+
     if (isYesCommand(normalized) && state.pendingSuggestedSlot) {
       const placedSuggested = await placeSlotToDom(state.pendingSuggestedSlot);
       if (placedSuggested) {
@@ -3592,7 +4437,7 @@ function parseDateFromText(normalizedText) {
       return;
     }
 
-    const parsedRequest = parseRequestedSlot(normalized);
+    const parsedRequest = parseRequestedSlotParts(normalized);
     const nowTs = Date.now();
     let previousRequest = state.pendingSlotRequest;
 
@@ -3602,8 +4447,44 @@ function parseDateFromText(normalizedText) {
     }
 
     const request = mergeSlotRequest(previousRequest ? previousRequest.request : null, parsedRequest);
-    if (!request) {
-      await speakAndPublish("check_schedule", "Не распознал дату и время. Скажите: Поставь на день и время", {}, {
+    console.log("[JARVIS slot parse]", JSON.stringify({
+      normalized,
+      parsedRequest,
+      previousRequest: previousRequest ? previousRequest.request : null,
+      mergedRequest: request,
+      isComplete: isCompleteSlotRequest(request),
+    }));
+
+    if (!request || !isCompleteSlotRequest(request)) {
+      const hasDate = Boolean(request && request.date);
+      const hasTime = Boolean(request && typeof request.startMin === "number");
+
+      let prompt = "Не распознал дату и время. Скажите: Поставь на день и время";
+      if (hasDate && !hasTime) {
+        prompt = "День понял. Теперь скажите время, например: в 10 утра";
+      } else if (!hasDate && hasTime) {
+        prompt = "Время понял. Теперь скажите день, например: в воскресенье";
+      }
+
+      state.pendingSlotRequest = {
+        request: request || { date: null, dateKey: "", dateLabel: "", startMin: null, specialist: "" },
+        ts: nowTs,
+        source: normalized,
+      };
+      queuePersist();
+
+      console.log("[JARVIS slot parse partial]", JSON.stringify({
+        normalized,
+        request,
+        hasDate,
+        hasTime,
+      }));
+
+      await speakAndPublish("check_schedule", prompt, {
+        partial: request || null,
+        hasDate,
+        hasTime,
+      }, {
         resume: true,
       });
       return;
@@ -3713,9 +4594,17 @@ function parseDateFromText(normalizedText) {
       transcriptLines: state.visitLines.length,
     }, { resume: false });
 
-    const aiDraft = await runLocalAiProcessing(state.visitLines, state.patientHint);
-    const fallbackDraft = buildVisitDraft(state.visitLines, state.patientHint);
+    const inferredPatient = state.patientHint || extractPatientNameFromDom() || "";
+    if (!state.patientHint && inferredPatient) {
+      state.patientHint = inferredPatient;
+    }
+
+    const aiDraft = await runLocalAiProcessing(state.visitLines, inferredPatient);
+    const fallbackDraft = buildVisitDraft(state.visitLines, inferredPatient);
     const draft = aiDraft || fallbackDraft;
+    if (!draft.patient && inferredPatient) {
+      draft.patient = inferredPatient;
+    }
     state.visitDraft = draft;
     state.stage = STAGE.AWAITING_VISIT_CONFIRMATION;
     queuePersist();
@@ -3731,9 +4620,16 @@ function parseDateFromText(normalizedText) {
 
   async function confirmVisitAndAdvance(verification) {
     state.strictVisitPending = false;
-    state.stage = STAGE.AWAITING_SLOT_SELECTION;
+    state.stage = AUTO_SCHEDULE_AFTER_VISIT ? STAGE.AWAITING_SLOT_SELECTION : STAGE.COMMAND;
     queuePersist();
     renderAll();
+
+    if (!AUTO_SCHEDULE_AFTER_VISIT) {
+      await speakAndPublish("fill_form", "Данные внесены и подтверждены. Прием завершен. Скажите: Джарвиз проверь расписание, когда будете готовы.", {
+        verification,
+      }, { resume: true });
+      return;
+    }
 
     await speakAndPublish("fill_form", "Данные внесены. Формирую расписание...", { verification }, { resume: false });
 
@@ -3809,6 +4705,16 @@ function parseDateFromText(normalizedText) {
       await speakAndPublish("fill_form", "Вы можете проверить и внести вручную", {}, {
         resume: true,
       });
+      return;
+    }
+
+    if (includesAny(normalized, ["подтверждаю", "подтвердить", "подтверждено"])) {
+      await handleVisitConfirmation("да подтверждаю");
+      return;
+    }
+
+    if (includesAny(normalized, ["отмена", "не подтверждаю", "не надо", "нет"])) {
+      await handleVisitConfirmation("нет");
       return;
     }
 
@@ -3896,8 +4802,22 @@ function parseDateFromText(normalizedText) {
 
     const hasWakeWord = containsWakeWord(normalized);
     const isFinishCmd = isFinishVisitCommand(normalized);
+    const wakeRequired = commandRequiresWakeWord(normalized, state.stage);
 
-    console.log("[JARVIS voice]", JSON.stringify({ text: text.slice(0, 80), stage: state.stage, hasWakeWord, isFinishCmd }));
+    console.log("[JARVIS voice]", JSON.stringify({
+      text: text.slice(0, 80),
+      stage: state.stage,
+      hasWakeWord,
+      isFinishCmd,
+      wakeRequired,
+    }));
+
+    if (wakeRequired && !hasWakeWord) {
+      console.log("[JARVIS blocked - no wake word in demo safe mode]");
+      return;
+    }
+
+    playAcknowledgeBeep();
 
     if (!hasWakeWord) {
       const handled = await processWithoutWakeWord(text, normalized);
@@ -3908,6 +4828,16 @@ function parseDateFromText(normalizedText) {
     }
 
     pushTranscript(VOICE_AUTHOR, text);
+
+    if (state.stage === STAGE.AWAITING_SLOT_SELECTION && isOpenVisitCommand(normalized)) {
+      await beginVisit(text);
+      return;
+    }
+
+    if (state.stage === STAGE.AWAITING_SLOT_SELECTION && isFinishVisitCommand(normalized)) {
+      await finishVisit();
+      return;
+    }
 
     if (state.stage !== STAGE.RECORDING_VISIT && isWakeOnlyCommand(normalized)) {
       await speakAndPublish("none", "Слушаю вашу команду", {}, {
@@ -3922,6 +4852,17 @@ function parseDateFromText(normalizedText) {
         return;
       }
       appendVisitLine(text);
+      return;
+    }
+
+    if (
+      state.stage === STAGE.COMMAND &&
+      (isAnyFreeSlotCommand(normalized) || isPlaceSlotCommand(normalized) || hasSlotRequestData(normalized))
+    ) {
+      state.stage = STAGE.AWAITING_SLOT_SELECTION;
+      queuePersist();
+      renderAll();
+      await applyRequestedSlot(normalized);
       return;
     }
 
@@ -3952,6 +4893,11 @@ function parseDateFromText(normalizedText) {
     if (state.stage === STAGE.AWAITING_SLOT_SELECTION) {
       if (isAnalyzeScheduleCommand(normalized)) {
         await announceCurrentAvailability();
+        return;
+      }
+
+      if (isAnyFreeSlotCommand(normalized)) {
+        await applyRequestedSlot(normalized);
         return;
       }
 
@@ -4024,7 +4970,15 @@ function parseDateFromText(normalizedText) {
     }
 
     if (isAnalyzeScheduleCommand(normalized)) {
+      state.stage = STAGE.AWAITING_SLOT_SELECTION;
+      queuePersist();
+      renderAll();
       await announceCurrentAvailability();
+      return;
+    }
+
+    if (isMarkCompletedCommand(normalized)) {
+      await markLatestServiceCompleted("", "voice");
       return;
     }
 
@@ -4053,6 +5007,63 @@ function parseDateFromText(normalizedText) {
   function enqueueVoiceText(text) {
     const normalizedText = String(text || "").trim();
     if (!normalizedText) {
+      return;
+    }
+
+    const normalized = normalizeText(normalizedText);
+    // Whisper sometimes hallucinates YouTube/podcast filler when audio is silent or noisy.
+    // Drop these aggressively so they don't pollute medical fields.
+    const globalNoise = [
+      "продолжение следует",
+      "субтитры",
+      "субтитры подготовил",
+      "субтитры сделал",
+      "субтитры от",
+      "субтитры создал",
+      "subtitles",
+      "subtitles by",
+      "спасибо за просмотр",
+      "спасибо за внимание",
+      "спасибо что смотрели",
+      "спасибо что были с нами",
+      "лайк и подписка",
+      "ставьте лайки",
+      "ставьте лайк",
+      "подписывайтесь на канал",
+      "подписывайтесь на наш канал",
+      "не забудьте подписаться",
+      "до новых встреч",
+      "увидимся в следующем видео",
+      "всем пока",
+      "музыка играет",
+      "играет музыка",
+      "фоновая музыка",
+      "звучит музыка",
+      "аплодисменты",
+      "смех в зале",
+      "корректор",
+      "редактор субтитров",
+      "amara.org",
+      "перевод субтитров",
+    ];
+    if (includesAny(normalized, globalNoise)) {
+      console.log("[JARVIS noise-filter] dropped:", normalizedText.slice(0, 80));
+      return;
+    }
+
+    // Drop ultra-short isolated tokens like "э", "а", "м", "ну" — pure filler.
+    const tokens = normalized.split(/\s+/).filter(Boolean);
+    if (tokens.length === 1 && tokens[0].length <= 2) {
+      const fillerSingles = new Set(["э", "а", "м", "у", "о", "ы", "ну", "эм", "ам", "ой", "ох", "ха", "хм", "мм", "ээ", "аа", "оо"]);
+      if (fillerSingles.has(tokens[0])) {
+        console.log("[JARVIS noise-filter] dropped filler:", tokens[0]);
+        return;
+      }
+    }
+
+    // Drop pure punctuation / symbols (Whisper sometimes emits "..." or single chars).
+    if (!/[a-zа-яё0-9]/i.test(normalizedText)) {
+      console.log("[JARVIS noise-filter] dropped non-alphanumeric:", normalizedText.slice(0, 40));
       return;
     }
 
@@ -4191,8 +5202,55 @@ function parseDateFromText(normalizedText) {
           localAiEnabled: Boolean(state.config.localAiUrl),
           localAiEndpoint: state.config.localAiUrl || "",
           awaitingVoiceConfirm: state.awaitingVoiceConfirm,
+          holdToTalk: state.holdToTalk,
+          holdingToTalk: state.holdingToTalk,
         });
         return;
+      }
+
+      if (message && message.type === "assistant:setHoldToTalk") {
+        void (async () => {
+          try {
+            const enabled = Boolean(message.payload && message.payload.enabled);
+            state.holdToTalk = enabled;
+            if (!enabled) {
+              state.holdingToTalk = false;
+            }
+            await storageSet({ [STORAGE_KEYS.holdToTalk]: enabled });
+            queuePersist();
+            renderAll();
+            sendResponse({ ok: true, holdToTalk: state.holdToTalk, holdingToTalk: state.holdingToTalk });
+          } catch (error) {
+            sendResponse({ ok: false, error: String(error || "set_hold_to_talk_failed") });
+          }
+        })();
+        return true;
+      }
+
+      if (message && message.type === "assistant:pushToTalk") {
+        void (async () => {
+          try {
+            const active = Boolean(message.payload && message.payload.active);
+            if (!state.holdToTalk) {
+              sendResponse({ ok: true, holdToTalk: false, listening: state.listening, holdingToTalk: state.holdingToTalk });
+              return;
+            }
+
+            state.holdingToTalk = active;
+            if (active && !state.listening) {
+              await startListening();
+            }
+            if (!active && state.listening) {
+              stopListening();
+            }
+            queuePersist();
+            renderAll();
+            sendResponse({ ok: true, holdToTalk: state.holdToTalk, listening: state.listening, holdingToTalk: state.holdingToTalk });
+          } catch (error) {
+            sendResponse({ ok: false, error: String(error || "push_to_talk_failed") });
+          }
+        })();
+        return true;
       }
 
       if (message && message.type === "assistant:startRecording") {
@@ -4257,6 +5315,45 @@ function parseDateFromText(normalizedText) {
             });
           } catch (error) {
             sendResponse({ ok: false, error: String(error || "manual_apply_failed") });
+          }
+        })();
+        return true;
+      }
+
+      if (message && message.type === "assistant:markServiceCompleted") {
+        void (async () => {
+          try {
+            const diary = String(message.payload && message.payload.diary ? message.payload.diary : "").trim();
+            const result = await markLatestServiceCompleted(diary, "manual");
+            if (!result.ok) {
+              sendResponse({ ok: false, error: result.error || "mark_service_failed" });
+              return;
+            }
+
+            sendResponse({
+              ok: true,
+              assignment: result.assignment,
+              completedAt: result.completedAt || "",
+            });
+          } catch (error) {
+            sendResponse({ ok: false, error: String(error || "mark_service_failed") });
+          }
+        })();
+        return true;
+      }
+
+      if (message && message.type === "assistant:manualCommand") {
+        void (async () => {
+          try {
+            const text = String(message.payload && message.payload.text ? message.payload.text : "").trim();
+            if (!text) {
+              sendResponse({ ok: false, error: "empty_manual_command" });
+              return;
+            }
+            enqueueVoiceText(text);
+            sendResponse({ ok: true });
+          } catch (error) {
+            sendResponse({ ok: false, error: String(error || "manual_command_failed") });
           }
         })();
         return true;
